@@ -245,7 +245,7 @@ export function countImages(folder) {
   }
 }
 
-export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL" }) {
+export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental" }) {
   ensureStore();
   const label = String(name ?? "").trim();
   if (!label) throw Object.assign(new Error("请填写项目名称"), { code: 400 });
@@ -262,6 +262,9 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
   if (!TRAINING_PRESETS[trainingPreset]) {
     throw Object.assign(new Error("请选择训练档位"), { code: 400 });
   }
+  if (!["incremental", "global"].includes(mapper)) {
+    throw Object.assign(new Error(`未知重建方式：${mapper}`), { code: 400 });
+  }
 
   const id = `${slugify(label)}-${randomBytes(3).toString("hex")}`;
   const now = new Date().toISOString();
@@ -277,7 +280,7 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
     useGpu: Boolean(useGpu),
     cameraModel,
     selectedModel: null,
-    mapper: "incremental",
+    mapper,
     forcePrepare: false,
     steps: STEP_ORDER.map(({ id: stepId, name: stepName }) => ({ id: stepId, name: stepName, status: "pending", progress: 0 })),
     lastError: null,

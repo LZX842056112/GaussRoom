@@ -11,12 +11,47 @@
  * Usage:  node tools/workbench/verify_ui.mjs
  */
 import { createRequire } from "node:module";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { resolve } from "node:path";
 
 const BASE = process.env.WORKBENCH_URL ?? "http://127.0.0.1:8123";
 const REPO = resolve(import.meta.dirname, "..", "..");
 const TEMP_SOURCE = resolve(REPO, "runs", "wb-selftest", "src12");
+
+/**
+ * The self-test needs a folder of real photos: create() rejects a missing path or
+ * one holding fewer than two images, and the run/abort cases need prepare to run
+ * long enough to interrupt. They are generated with the project's own Pillow, so
+ * nothing is downloaded, and they live under runs/ (gitignored) so the repository
+ * stays clean. Earlier revisions leaned on a leftover directory that has since been
+ * cleaned up, which silently broke every case that creates a project.
+ */
+function ensureFixture() {
+  const present = readdirSafe(TEMP_SOURCE).filter((name) => name.toLowerCase().endsWith(".jpg")).length;
+  if (present >= 12) return;
+  mkdirSync(TEMP_SOURCE, { recursive: true });
+  const python = resolve(REPO, ".venv", "Scripts", "python.exe");
+  if (!existsSync(python)) throw new Error(`缺少 Python 环境：${python}（先跑 uv sync）`);
+  const script = `
+from PIL import Image
+from pathlib import Path
+
+out = Path(r"${TEMP_SOURCE}")
+for i in range(12):
+    img = Image.linear_gradient("L").rotate(i * 3).resize((1024, 768))
+    img.convert("RGB").save(out / ("%02d.jpg" % (i + 1)), quality=85)
+`;
+  execFileSync(python, ["-c", script], { stdio: "ignore" });
+}
+
+function readdirSafe(folder) {
+  try {
+    return readdirSync(folder);
+  } catch {
+    return [];
+  }
+}
 
 function loadPlaywright() {
   const require = createRequire(import.meta.url);
@@ -127,7 +162,8 @@ const baselineDemo = demoProject ? (await apiGet(`/api/projects/${DEMO_ID}`)).bo
 console.log(`workbench: ${BASE}`);
 console.log(`baseline projects: ${baselineIds.join(", ")}`);
 console.log(`demo project (has scene): ${DEMO_ID ?? "（无，相关用例将跳过）"}`);
-console.log(`temp source: ${TEMP_SOURCE}\n`);
+ensureFixture();
+console.log(`temp source: ${TEMP_SOURCE}（${readdirSafe(TEMP_SOURCE).length} 个文件）\n`);
 
 const executablePath = resolveExecutable(chromium);
 const browser = await chromium.launch({ headless: true, executablePath });
@@ -171,7 +207,9 @@ const textOf = async (selector) => (await $(selector).textContent()) ?? "";
 
 async function bootWorkbench() {
   await page.goto(`${BASE}/`, { waitUntil: "domcontentloaded" });
-  await page.waitForFunction(() => document.querySelectorAll("#projectList li").length > 0, null, { timeout: 15000 });
+  // Ready means boot() finished loading /api/presets, which is what re-enables
+  // #newProject. Waiting for a sidebar row instead breaks when no project exists.
+  await page.waitForFunction(() => !document.getElementById("newProject").disabled, null, { timeout: 15000 });
 }
 
 async function busyProject() {
@@ -256,6 +294,9 @@ await test("W7", "#createProject 正常创建并自动打开", async () => {
   assert(tempId, "未找到新建的项目 id");
   const activeId = await page.locator("#projectList li.active").getAttribute("data-id");
   assertEqual(activeId, tempId, "侧栏高亮");
+  const created = await apiGet(`/api/projects/${tempId}`);
+  assertEqual(created.body.mapper, "incremental", "重建方式默认值");
+  assert((await textOf("#projectMeta")).includes("重建方式 增量式"), "项目页未显示重建方式");
 });
 
 await test("W10", "侧栏点击切换项目时高亮跟随", async () => {
@@ -442,6 +483,44 @@ await test("W25", "#deleteButton 删除临时项目并回到基线", async () =>
   await page.waitForFunction((expected) => document.querySelectorAll("#projectList li").length === expected, baselineIds.length, { timeout: 15000 });
   const ids = await projectIds();
   assertEqual(JSON.stringify(ids), JSON.stringify(baselineIds), "项目集合未回到基线");
+});
+
+await test("W28", "#formMapper 选全局式：落盘并在项目页显示", async () => {
+  await $("#newProject").click();
+  await page.waitForSelector("#formView:not(.hidden)");
+  // Re-opening the form clears state.formPreset and state.sourcePath (the latter is
+  // mirrored into #formSource by renderForm), so both have to be set again here.
+  await page.locator("#presetList .preset").nth(0).click();
+  await $("#formSource").fill(TEMP_SOURCE);
+  await $("#formName").fill("V 全局式项目");
+  await $("#formMapper").selectOption("global");
+  assertEqual(await $("#formMapper").inputValue(), "global", "下拉选中值");
+  await $("#createProject").click();
+  await page.waitForSelector("#projectView:not(.hidden)", { timeout: 15000 });
+  const ids = await projectIds();
+  const globalId = ids.find((id) => !baselineIds.includes(id));
+  assert(globalId, "未找到新建的项目 id");
+  assertEqual((await apiGet(`/api/projects/${globalId}`)).body.mapper, "global", "mapper 落盘");
+  assert((await textOf("#projectMeta")).includes("重建方式 全局式"), "项目页未显示重建方式");
+  dialogAction = "accept";
+  await $("#deleteButton").click();
+  await page.waitForFunction(
+    (expected) => document.querySelectorAll("#projectList li").length === expected,
+    baselineIds.length,
+    { timeout: 15000 },
+  );
+});
+
+await test("W29", "接口层拒绝非法的重建方式", async () => {
+  const { status, body } = await apiJson("POST", "/api/projects", {
+    name: "V 非法 mapper",
+    sourceDir: TEMP_SOURCE,
+    trainingPreset: "fast",
+    mapper: "nope",
+  });
+  assertEqual(status, 400, "HTTP 状态");
+  assertEqual(body?.error, "未知重建方式：nope", "错误文案");
+  assertEqual((await projectIds()).length, baselineIds.length, "不应留下项目");
 });
 
 // ---------------------------------------------------------------- viewer page

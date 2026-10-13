@@ -181,6 +181,7 @@ function renderProject() {
   $("projectMeta").textContent = [
     project.sourceDir,
     `相机模型 ${project.cameraModel}`,
+    `重建方式 ${project.mapper === "global" ? "全局式" : "增量式"}`,
     project.useGpu ? "GPU 加速" : "仅 CPU",
     modelInfo,
   ].filter(Boolean).join(" · ");
@@ -507,6 +508,7 @@ $("createProject").onclick = async () => {
         trainingPreset: state.formPreset,
         useGpu: $("formGpu").checked,
         cameraModel: $("formCamera").value,
+        mapper: $("formMapper").value,
       }),
     });
     await loadProjects();

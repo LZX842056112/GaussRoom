@@ -61,7 +61,14 @@
                 <option value="PINHOLE">PINHOLE</option>
               </select>
             </label>
+            <label class="muted" style="font-size:13px">重建方式
+              <select id="formMapper" style="width:auto;display:inline-block">
+                <option value="incremental" selected>增量式（默认）</option>
+                <option value="global">全局式</option>
+              </select>
+            </label>
           </div>
+          <p class="muted" style="font-size:12px">增量式逐张注册相机，照片分组细碎或跨组重叠偏弱时可能分裂成多个模型；全局式一次性联合求解全部位姿、不会分裂。创建后仍可在验收证据里切换。</p>
         </div>
         <div class="row">
           <button id="createProject" class="primary">创建项目</button>
