@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>室内三维漫游 · 本地场景</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0d1117; }
+  canvas { display: block; touch-action: none; }
+  .hud {
+    position: fixed; left: 14px; top: 14px; z-index: 2; max-width: 330px;
+    background: rgba(18, 24, 33, .82); color: #e6edf3; border: 1px solid #2b3a4d;
+    border-radius: 10px; padding: 14px 16px; font: 13px/1.7 "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .hud h1 { font-size: 15px; margin: 0 0 8px; }
+  .hud p { margin: 4px 0; color: #9fb0c3; }
+  .hud kbd {
+    background: #24303f; border: 1px solid #3a4c60; border-radius: 4px;
+    padding: 0 5px; font-size: 12px; color: #d7e3ef;
+  }
+  .row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  button {
+    background: #1f6feb; color: #fff; border: 0; border-radius: 6px;
+    padding: 6px 12px; font-size: 13px; cursor: pointer; font-family: inherit;
+  }
+  button:hover { background: #388bfd; }
+  input[type=range] { width: 120px; }
+  #status { margin-top: 10px; color: #7d8fa3; font-size: 12px; }
+  #loading {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #0d1117; color: #c9d5e2; font: 15px/1.8 "Microsoft YaHei", system-ui, sans-serif;
+    z-index: 3; text-align: center; padding: 24px;
+  }
+</style>
+</head>
+<body>
+<div id="loading">正在加载三维场景…<br><span id="loadingDetail">准备中</span></div>
+
+<div class="hud">
+  <h1>室内三维漫游</h1>
+  <p>鼠标左键拖动：左右转动视角</p>
+  <p>鼠标右键拖动：上下俯仰　滚轮：缩放视野</p>
+  <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动　<kbd>Shift</kbd> 加速　<kbd>Ctrl</kbd> 减速</p>
+  <div class="row">
+    <button id="reset">重置视角</button>
+    <label>速度 <input id="speed" type="range" min="0.2" max="4" step="0.1" value="1"></label>
+  </div>
+  <div id="status">等待场景…</div>
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "./vendor/three/build/three.module.js",
+    "three/addons/postprocessing/Pass.js": "./vendor/three/examples/jsm/postprocessing/Pass.js",
+    "@sparkjsdev/spark": "./vendor/spark.module.js"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+
+const loading = document.getElementById("loading");
+const loadingDetail = document.getElementById("loadingDetail");
+const status = document.getElementById("status");
+
+function fail(message) {
+  loading.style.display = "flex";
+  loadingDetail.textContent = message;
+  status.textContent = "加载失败";
+}
+
+const scene = new THREE.Scene();
+const HOME_FOV = 65;   // 滚轮缩放的复位基准
+const camera = new THREE.PerspectiveCamera(HOME_FOV, innerWidth / innerHeight, 0.02, 400);
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+document.body.appendChild(renderer.domElement);
+scene.add(new SparkRenderer({ renderer }));
+
+// Scene URL comes from ?scene=... so the workbench can point at any project's export.
+const sceneUrl = new URLSearchParams(location.search).get("scene") || "/scene.ply";
+const splat = new SplatMesh({ url: sceneUrl, paged: false });
+scene.add(splat);
+
+// The reconstruction frame is arbitrary, and COLMAP anchors it on the first image
+// whose +Y is image-down — so the scene often arrives upside down for a Y-up viewer.
+// The workbench passes an orthonormal basis (rows e_x, e_y, e_z) that re-expresses
+// reconstruction coordinates as Y-up; rotate the splat into that frame so all the
+// camera and movement maths below can keep assuming Y is up.
+const basisParam = (new URLSearchParams(location.search).get("basis") || "").split(",").map(Number);
+const hasBasis = basisParam.length === 9 && basisParam.every(Number.isFinite);
+function applySceneBasis() {
+  if (!hasBasis) return;
+  const matrix = new THREE.Matrix4().set(
+    basisParam[0], basisParam[1], basisParam[2], 0,
+    basisParam[3], basisParam[4], basisParam[5], 0,
+    basisParam[6], basisParam[7], basisParam[8], 0,
+    0, 0, 0, 1,
+  );
+  splat.quaternion.setFromRotationMatrix(matrix);
+}
+applySceneBasis();
+
+// Scene units come from the reconstruction (metres); Y is up in the export.
+// The workbench passes ?home=x,y,z,yaw,pitch derived from the camera trajectory,
+// because the reconstruction frame is arbitrary and a fixed pose would face the
+// wrong way. Falls back to the old defaults when absent.
+const homeParam = (new URLSearchParams(location.search).get("home") || "").split(",").map(Number);
+const hasHome = homeParam.length === 5 && homeParam.every(Number.isFinite);
+const home = {
+  position: hasHome ? new THREE.Vector3(homeParam[0], homeParam[1], homeParam[2]) : new THREE.Vector3(0, 1.5, 0),
+  yaw: hasHome ? homeParam[3] : 0,
+  pitch: hasHome ? homeParam[4] : 0,
+  fov: HOME_FOV,
+};
+let yaw = home.yaw;
+let pitch = home.pitch;
+let speedScale = 1;
+const keys = new Set();
+
+function reset() {
+  keys.clear();
+  camera.position.copy(home.position);
+  yaw = home.yaw;
+  pitch = home.pitch;
+  camera.fov = home.fov;
+  camera.updateProjectionMatrix();
+}
+
+document.getElementById("reset").onclick = reset;
+document.getElementById("speed").oninput = (event) => { speedScale = Number(event.target.value); };
+reset();
+
+addEventListener("keydown", (event) => {
+  if (["KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"].includes(event.code)) {
+    event.preventDefault();
+    keys.add(event.code);
+  }
+});
+addEventListener("keyup", (event) => keys.delete(event.code));
+addEventListener("blur", () => keys.clear());
+
+const canvas = renderer.domElement;
+const DRAG_SENSITIVITY = 0.0028;
+const FOV_MIN = 20;
+const FOV_MAX = 100;
+const FOV_STEP = 2.5;   // 每格滚轮 2.5°，约 18 格走完 20–100
+
+let dragId = null;
+let dragButton = -1;
+
+canvas.addEventListener("pointerdown", (event) => {
+  // 左键(0) 只转 yaw，右键(2) 只转 pitch；其余按键忽略。
+  if (event.button !== 0 && event.button !== 2) return;
+  dragId = event.pointerId;
+  dragButton = event.button;
+  canvas.setPointerCapture(event.pointerId);
+});
+canvas.addEventListener("pointermove", (event) => {
+  if (event.pointerId !== dragId) return;
+  if (dragButton === 0) {
+    yaw -= event.movementX * DRAG_SENSITIVITY;
+  } else if (dragButton === 2) {
+    pitch = THREE.MathUtils.clamp(pitch - event.movementY * DRAG_SENSITIVITY, -1.45, 1.45);
+  }
+});
+function endDrag() {
+  dragId = null;
+  dragButton = -1;
+}
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
+  canvas.addEventListener(type, endDrag);
+}
+
+// 右键要用于俯仰，必须阻止浏览器右键菜单。
+canvas.addEventListener("contextmenu", (event) => event.preventDefault());
+
+// 滚轮改 FOV（相机位置不动）；passive:false 才允许 preventDefault 阻止页面滚动。
+canvas.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  camera.fov = THREE.MathUtils.clamp(
+    camera.fov + Math.sign(event.deltaY) * FOV_STEP, FOV_MIN, FOV_MAX);
+  camera.updateProjectionMatrix();
+}, { passive: false });
+
+// 自动化验证钩子：仅在 ?debug=1 时暴露只读状态，正常使用完全无感。
+if (new URLSearchParams(location.search).get("debug") === "1") {
+  window.__viewerDebug = {
+    get yaw() { return yaw; },
+    get pitch() { return pitch; },
+    get fov() { return camera.fov; },
+    get position() { return camera.position.toArray(); },
+    get speedScale() { return speedScale; },
+    get sceneQuaternion() { return splat.quaternion.toArray(); },
+  };
+}
+
+function resize() {
+  renderer.setSize(innerWidth, innerHeight);
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+}
+addEventListener("resize", resize);
+resize();
+
+const rotation = new THREE.Euler(0, 0, 0, "YXZ");
+const move = new THREE.Vector3();
+const yawOnly = new THREE.Quaternion();
+const up = new THREE.Vector3(0, 1, 0);
+
+try {
+  const timeout = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error("场景初始化超时（60 秒）")), 60000));
+  await Promise.race([splat.initialized, timeout]);
+  applySceneBasis();   // 再设一次，避免 Spark 在加载过程中重置网格变换
+  loading.style.display = "none";
+  status.textContent = "场景已就绪 · 本地加载";
+} catch (error) {
+  fail("加载失败：" + error.message);
+  throw error;
+}
+
+let previous = performance.now();
+renderer.setAnimationLoop((time) => {
+  const delta = Math.min((time - previous) / 1000, 0.05);
+  previous = time;
+
+  camera.quaternion.setFromEuler(rotation.set(pitch, yaw, 0));
+  move.set(
+    Number(keys.has("KeyD")) - Number(keys.has("KeyA")),
+    0,
+    Number(keys.has("KeyS")) - Number(keys.has("KeyW")),
+  );
+  if (move.lengthSq() > 0) {
+    let multiplier = speedScale;
+    if (keys.has("ShiftLeft") || keys.has("ShiftRight")) multiplier *= 4;
+    if (keys.has("ControlLeft") || keys.has("ControlRight")) multiplier *= 0.25;
+    yawOnly.setFromAxisAngle(up, yaw);
+    move.normalize().applyQuaternion(yawOnly);
+    camera.position.addScaledVector(move, delta * 1.6 * multiplier);
+  }
+  renderer.render(scene, camera);
+});
+</script>
+</body>
+</html>

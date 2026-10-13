@@ -1,0 +1,39 @@
+# ---- Python（uv 环境）----
+.venv/
+__pycache__/
+*.py[cod]
+
+# ---- Node ----
+node_modules/
+
+# ---- 本机配置（含本机绝对路径，不入库；模板见 .env.example）----
+.env
+
+# ---- 数据与产物（体积大，且含个人照片，不入库）----
+data/
+projects/
+runs/
+target/
+outputs/
+
+# ---- 外部工具：下载的归档与解压目录，按 README 自行获取（约 2 GB）----
+tools/*.zip
+tools/*.whl
+tools/*.html
+tools/*.json
+tools/*.cc
+tools/colmap-4.2.1/
+tools/colmap-4.2.1-cuda/
+tools/brush-0.3.0/
+tools/viewer-vendor/
+
+# ---- Agent 本地状态 ----
+.workbuddy-ai/
+
+# ---- IDE / 编辑器本地配置 ----
+.idea/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini

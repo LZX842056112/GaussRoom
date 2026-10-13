@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GaussRoom 高斯房间</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header>
+  <h1>GaussRoom 高斯房间</h1>
+  <div id="health"></div>
+</header>
+
+<div class="layout">
+  <aside>
+    <button id="newProject" class="primary" style="width:100%">+ 新建项目</button>
+    <ul id="projectList"></ul>
+    <p id="listEmpty" class="muted" style="font-size:13px">还没有项目。</p>
+  </aside>
+
+  <main>
+    <section id="emptyView">
+      <div class="card">
+        <h2>从一组照片重建可漫游的三维场景</h2>
+        <p class="muted">导入一个图片文件夹，工作台会依次完成特征提取、匹配、稀疏重建、几何门禁、去畸变与三维高斯训练，最后在同一页面里漫游。</p>
+        <p class="muted">原图只读：工作台只在项目目录里生成长边 2048 的工作副本，不会修改、移动或上传你的照片。</p>
+      </div>
+    </section>
+
+    <section id="formView" class="hidden">
+      <div class="card">
+        <h2>新建项目</h2>
+        <div class="field">
+          <label for="formName">项目名称</label>
+          <input id="formName" type="text" placeholder="例如：客厅扫描">
+        </div>
+        <div class="field">
+          <label for="formSource">图片文件夹</label>
+          <div class="row">
+            <input id="formSource" type="text" placeholder="C:\Users\...\图片文件夹">
+            <button id="pickFolder">选择文件夹…</button>
+          </div>
+          <p id="sourceHint" class="muted" style="font-size:12px"></p>
+        </div>
+        <div class="field">
+          <label>训练档位（必选）</label>
+          <div id="presetList" class="presets"></div>
+          <p class="muted" style="font-size:12px">耗时与体积为基于本机实测的估算值；正式训练开始前还可以在项目页再次更改。</p>
+        </div>
+        <div class="field">
+          <label>重建选项</label>
+          <div class="row">
+            <label class="muted" style="font-size:13px"><input id="formGpu" type="checkbox" checked> 使用 GPU 加速特征提取与匹配</label>
+            <label class="muted" style="font-size:13px">相机模型
+              <select id="formCamera" style="width:auto;display:inline-block">
+                <option value="SIMPLE_RADIAL">SIMPLE_RADIAL</option>
+                <option value="OPENCV">OPENCV</option>
+                <option value="RADIAL">RADIAL</option>
+                <option value="PINHOLE">PINHOLE</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <div class="row">
+          <button id="createProject" class="primary">创建项目</button>
+          <button id="cancelCreate">取消</button>
+          <span id="formError" class="muted" style="color:var(--danger)"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="projectView" class="hidden">
+      <div id="banner"></div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between;align-items:flex-start">
+          <div>
+            <h2 id="projectName"></h2>
+            <p id="projectMeta" class="muted" style="font-size:13px;margin:2px 0 0"></p>
+          </div>
+          <div class="row">
+            <button id="editToggle">编辑</button>
+            <button id="deleteButton" class="danger">删除项目</button>
+          </div>
+        </div>
+
+        <div id="editPanel" class="hidden" style="margin-top:14px;border-top:1px solid var(--border);padding-top:14px">
+          <div class="field">
+            <label for="editName">项目名称</label>
+            <input id="editName" type="text">
+          </div>
+          <div class="row" style="margin-bottom:10px">
+            <label class="muted" style="font-size:13px"><input id="editGpu" type="checkbox"> 使用 GPU 加速</label>
+            <label class="muted" style="font-size:13px">相机模型
+              <select id="editCamera" style="width:auto;display:inline-block">
+                <option value="SIMPLE_RADIAL">SIMPLE_RADIAL</option>
+                <option value="OPENCV">OPENCV</option>
+                <option value="RADIAL">RADIAL</option>
+                <option value="PINHOLE">PINHOLE</option>
+              </select>
+            </label>
+          </div>
+          <p id="editHint" class="muted" style="font-size:12px"></p>
+          <div class="row">
+            <button id="saveEdit" class="primary">保存</button>
+            <button id="cancelEdit">取消</button>
+            <span id="editError" style="color:var(--danger);font-size:13px"></span>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">训练档位</h3>
+          <span id="presetNote" class="muted" style="font-size:12px"></span>
+        </div>
+        <div id="presetListProject" class="presets" style="margin-top:10px"></div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">进度</h3>
+          <span id="globalNote" class="muted" style="font-size:12px"></span>
+        </div>
+        <div class="bar"><div id="globalBar"></div></div>
+        <div class="row" style="margin-top:12px">
+          <button id="runButton" class="primary">开始重建</button>
+          <button id="abortButton" class="danger hidden">中止</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>步骤</h3>
+        <ol id="stepList" class="steps"></ol>
+      </div>
+
+      <div id="viewerCard" class="card hidden">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">漫游</h3>
+          <div class="row">
+            <button id="downloadScene">下载场景 PLY</button>
+            <button id="reloadScene">重新加载</button>
+          </div>
+        </div>
+        <p class="muted" style="font-size:12px">鼠标左键拖动左右转视角，右键拖动上下俯仰，滚轮缩放；<kbd>WASD</kbd> 移动，<kbd>Shift</kbd> 加速，<kbd>Ctrl</kbd> 减速。</p>
+        <div id="viewerWrap"><iframe id="viewer" allow="fullscreen"></iframe></div>
+        <p id="viewerNote" class="muted" style="font-size:12px"></p>
+      </div>
+
+      <div id="evidenceCard" class="card hidden">
+        <h3>验收证据</h3>
+        <div id="evidence"></div>
+      </div>
+
+      <div class="card">
+        <div class="row" style="justify-content:space-between">
+          <h3 style="margin:0">原始日志</h3>
+          <div class="row">
+            <label class="muted" style="font-size:12px"><input id="pauseScroll" type="checkbox"> 暂停滚动</label>
+            <select id="logStep" style="width:auto"></select>
+            <button id="loadLog">载入日志</button>
+          </div>
+        </div>
+        <div id="logPanel" style="margin-top:10px"><pre id="log"></pre></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<script type="module" src="/app.js"></script>
+</body>
+</html>

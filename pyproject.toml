@@ -1,0 +1,14 @@
+[project]
+name = "gaussroom"
+version = "0.1.0"
+description = "从一组照片重建可漫游的室内三维高斯场景"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.5.4",
+    "pillow>=12.3.0",
+]
+
+[tool.uv]
+# Only the environment is needed; the Python scripts are invoked as standalone
+# files (see tools/workbench/lib/paths.mjs), so the project itself is not installed.
+package = false
