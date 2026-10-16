@@ -392,7 +392,11 @@ await test("W26", "漫游 iframe 携带由重建数据推导的默认机位", as
   const [x, y, z, yaw] = values;
   // 默认高度必须接近相机轨迹高度（此项目约 0），不能是旧硬编码的 1.5 m。
   assert(Math.abs(y) < 0.5, `默认高度 ${y} 不合理`);
-  assert(Math.abs(yaw) > 0.5, `默认朝向 ${yaw} 接近 0，说明仍是旧默认`);
+  // 旧硬编码默认是 (0, 1.5, 0, 0, 0)，只要有一项不同就说明来自重建数据。
+  // 注意 yaw 可以合法地接近 0（轨迹主轴恰好对齐参考轴），不能只用它判断。
+  const LEGACY = [0, 1.5, 0, 0, 0];
+  assert(values.some((value, index) => Math.abs(value - LEGACY[index]) > 1e-3),
+    `home 参数与旧硬编码默认一致: ${match[1]}`);
   assert(x !== undefined && z !== undefined, "位置分量缺失");
 }, DEMO_ID ? null : "没有带场景的项目");
 
@@ -424,6 +428,14 @@ await test("W27", "漫游 iframe 携带把重建坐标转正的基（正交且�
   const mapped = [0, 1, 2].map((axis) => dot(rows[axis], rows[1]));
   assert(Math.abs(mapped[0]) < 1e-3 && Math.abs(mapped[1] - 1) < 1e-3 && Math.abs(mapped[2]) < 1e-3,
     `e_y 未被映射到 +Y: ${mapped.map((v) => v.toFixed(3)).join(",")}`);
+}, DEMO_ID ? null : "没有带场景的项目");
+
+await test("W30", "漫游 iframe 携带相机轨迹尺度（radius，用于缩放上限）", async () => {
+  const src = await $("#viewer").getAttribute("src");
+  const match = /[?&]radius=([^&]+)/.exec(src);
+  assert(match, `iframe 地址缺少 radius 参数: ${src}`);
+  const value = Number(match[1]);
+  assert(Number.isFinite(value) && value > 0, `radius 不是正数: ${match[1]}`);
 }, DEMO_ID ? null : "没有带场景的项目");
 
 await test("W20", "#runButton 启动作业并显示中止按钮", async () => {
@@ -534,8 +546,11 @@ const readState = () => viewer.evaluate(() => ({
   yaw: window.__viewerDebug.yaw,
   pitch: window.__viewerDebug.pitch,
   fov: window.__viewerDebug.fov,
+  distance: window.__viewerDebug.distance,
+  target: window.__viewerDebug.target,
+  sceneRadius: window.__viewerDebug.sceneRadius,
+  maxDistance: window.__viewerDebug.maxDistance,
   position: window.__viewerDebug.position,
-  speedScale: window.__viewerDebug.speedScale,
 }));
 
 if (DEMO_ID) {
@@ -560,32 +575,43 @@ const drag = async (button, dx, dy) => {
   await viewer.waitForTimeout(120);
 };
 
-await test("V2", "左键拖动只改变 yaw，pitch 不变", async () => {
+const distanceMoved = (a, b) => Math.hypot(...a.map((v, i) => v - b[i]));
+
+await test("V2", "左键拖动平移：位置与支点一起移动，角度和距离不变", async () => {
   const before = await readState();
   await drag("left", 120, 60);
   const after = await readState();
-  assert(Math.abs(after.yaw - before.yaw) > 0.05, `yaw 未变化: ${before.yaw} -> ${after.yaw}`);
+  assert(distanceMoved(after.position, before.position) > 0.01,
+    `位置未变化: ${before.position} -> ${after.position}`);
+  assert(JSON.stringify(after.target) !== JSON.stringify(before.target), "支点应随平移移动");
+  assertEqual(after.yaw, before.yaw, "yaw 不应变化");
   assertEqual(after.pitch, before.pitch, "pitch 不应变化");
+  assertEqual(after.distance, before.distance, "distance 不应变化");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-await test("V3", "右键拖动只改变 pitch，yaw 不变", async () => {
+await test("V3", "右键拖动 360° 旋转：yaw 与 pitch 同时改变，绕支点转", async () => {
   const before = await readState();
   await drag("right", 60, 100);
   const after = await readState();
+  assert(Math.abs(after.yaw - before.yaw) > 0.05, `yaw 未变化: ${before.yaw} -> ${after.yaw}`);
   assert(Math.abs(after.pitch - before.pitch) > 0.05, `pitch 未变化: ${before.pitch} -> ${after.pitch}`);
-  assertEqual(after.yaw, before.yaw, "yaw 不应变化");
+  assertEqual(JSON.stringify(after.target), JSON.stringify(before.target), "支点不应移动");
+  assertEqual(after.distance, before.distance, "distance 不应变化");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-await test("V4", "滚轮改变 fov 并夹紧于 20–100", async () => {
+await test("V4", "滚轮缩放 distance，夹紧于 [0.1, maxDistance]，上限足以看见整体", async () => {
   const before = await readState();
   await viewer.mouse.move(canvasBox.x + canvasBox.width / 2, canvasBox.y + canvasBox.height / 2);
   await viewer.mouse.wheel(0, -120);
   const zoomedIn = await readState();
-  assert(zoomedIn.fov < before.fov, `滚轮向前应缩小 fov: ${before.fov} -> ${zoomedIn.fov}`);
+  assert(zoomedIn.distance < before.distance, `滚轮向前应拉近: ${before.distance} -> ${zoomedIn.distance}`);
   for (let i = 0; i < 60; i += 1) await viewer.mouse.wheel(0, -120);
-  assertEqual((await readState()).fov, 20, "fov 下限");
-  for (let i = 0; i < 80; i += 1) await viewer.mouse.wheel(0, 120);
-  assertEqual((await readState()).fov, 100, "fov 上限");
+  assertEqual((await readState()).distance, 0.1, "拉近下限");
+  for (let i = 0; i < 120; i += 1) await viewer.mouse.wheel(0, 120);
+  const far = await readState();
+  assertEqual(far.distance, far.maxDistance, "拉远上限");
+  assert(far.distance > far.sceneRadius,
+    `拉远上限 ${far.distance} 未超过场景半径 ${far.sceneRadius}，缩到最小仍看不到整体`);
 }, DEMO_ID ? null : "没有带场景的项目");
 
 await test("V5", "右键不再弹出浏览器菜单（contextmenu 被阻止）", async () => {
@@ -598,12 +624,24 @@ await test("V5", "右键不再弹出浏览器菜单（contextmenu 被阻止）",
   assert(prevented, "contextmenu 未被 preventDefault");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-await test("V6", "#speed 滑块改变 speedScale", async () => {
-  await viewer.locator("#speed").fill("2");
-  await viewer.waitForFunction(() => window.__viewerDebug.speedScale === 2, null, { timeout: 5000 });
+await test("V6", "右键左右可转满 360°（yaw 不夹紧），上下夹紧在 ±1.5", async () => {
+  await viewer.locator("#reset").click();
+  await viewer.waitForTimeout(150);
+  const start = await readState();
+  const spun = 6 * 400 * 0.004;   // 6 次 × 400 px × 灵敏度
+  for (let i = 0; i < 6; i += 1) await drag("right", 400, 0);
+  const afterYaw = await readState();
+  assert(Math.abs(afterYaw.yaw - (start.yaw - spun)) < 1e-3,
+    `yaw 应线性累加: ${afterYaw.yaw} vs ${start.yaw - spun}`);
+  assert(Math.abs(afterYaw.yaw) > Math.PI * 2, `yaw 应超过一整圈: ${afterYaw.yaw}`);
+
+  for (let i = 0; i < 4; i += 1) await drag("right", 0, 300);
+  assertEqual((await readState()).pitch, -1.5, "俯仰下限");
+  for (let i = 0; i < 8; i += 1) await drag("right", 0, -300);
+  assertEqual((await readState()).pitch, 1.5, "俯仰上限");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-await test("V1", "#reset 复位 yaw / pitch / fov / 位置", async () => {
+await test("V1", "#reset 复位 yaw / pitch / fov / distance / 位置", async () => {
   await drag("left", 90, 40);
   await viewer.mouse.wheel(0, -120);
   await viewer.locator("#reset").click();
@@ -612,6 +650,7 @@ await test("V1", "#reset 复位 yaw / pitch / fov / 位置", async () => {
   assertEqual(state.yaw, 0, "yaw");
   assertEqual(state.pitch, 0, "pitch");
   assertEqual(state.fov, 65, "fov");
+  assertEqual(state.distance, 2, "distance");
   assertEqual(JSON.stringify(state.position), JSON.stringify([0, 1.5, 0]), "position");
 }, DEMO_ID ? null : "没有带场景的项目");
 
@@ -658,6 +697,21 @@ await test("V7", "?home= 参数生效：reset 回到传入的机位", async () =
     JSON.stringify(pose.slice(0, 3)),
     "position",
   );
+}, DEMO_ID ? null : "没有带场景的项目");
+
+// V9: the ?radius= parameter (camera-trajectory scale) must drive the zoom-out cap.
+await test("V9", "?radius= 生效：缩放上限 = max(3×半径, 20)", async () => {
+  const target = `${BASE}/viewer.html?scene=/api/projects/${DEMO_ID}/scene.ply&debug=1&radius=12`;
+  const pageWithRadius = await context.newPage();
+  await pageWithRadius.goto(target, { waitUntil: "domcontentloaded" });
+  await pageWithRadius.waitForFunction(() => Boolean(window.__viewerDebug), null, { timeout: 15000 });
+  const state = await pageWithRadius.evaluate(() => ({
+    sceneRadius: window.__viewerDebug.sceneRadius,
+    maxDistance: window.__viewerDebug.maxDistance,
+  }));
+  await pageWithRadius.close();
+  assertEqual(state.sceneRadius, 12, "sceneRadius");
+  assertEqual(state.maxDistance, 36, "maxDistance");
 }, DEMO_ID ? null : "没有带场景的项目");
 await context.close();
 await browser.close();

@@ -120,6 +120,12 @@ export function scenePose(project) {
       const position = [0, 1, 2].map((axis) =>
         upright.reduce((sum, c) => sum + c[axis], 0) / upright.length);
 
+      // 相机轨迹的尺度：从质心到最远相机的距离。观众能走到哪里，场景就有多大，
+      // 用它定查看器的缩放上限。不用高斯点的包围盒——3DGS 常有远处的漂浮点，
+      // 本项目实测包围球半径 64，而房间本体只有 8 左右，用包围盒会把上限撑到 192。
+      const extent = Math.max(...upright.map((center) =>
+        Math.hypot(center[0] - position[0], center[1] - position[1], center[2] - position[2])));
+
       // Principal axis of the horizontal camera path (2x2 eigenvector).
       const xs = upright.map((c) => c[0] - position[0]);
       const zs = upright.map((c) => c[2] - position[2]);
@@ -152,6 +158,7 @@ export function scenePose(project) {
         yaw,
         pitch: 0,
         basis,
+        extent,
         cameras: centers.length,
         elongation: Math.max(sxx, szz) / Math.max(1e-6, Math.min(sxx, szz)),
         up: frame ? frame.up : null,

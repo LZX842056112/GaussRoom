@@ -39,12 +39,11 @@
 
 <div class="hud">
   <h1>室内三维漫游</h1>
-  <p>鼠标左键拖动：左右转动视角</p>
-  <p>鼠标右键拖动：上下俯仰　滚轮：缩放视野</p>
-  <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动　<kbd>Shift</kbd> 加速　<kbd>Ctrl</kbd> 减速</p>
+  <p>鼠标右键拖动：360° 旋转（左右不限，上下到头为止）</p>
+  <p>鼠标左键拖动：平移　滚轮：缩放（拉远可见整体模型）</p>
+  <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</p>
   <div class="row">
     <button id="reset">重置视角</button>
-    <label>速度 <input id="speed" type="range" min="0.2" max="4" step="0.1" value="1"></label>
   </div>
   <div id="status">等待场景…</div>
 </div>
@@ -74,7 +73,7 @@ function fail(message) {
 }
 
 const scene = new THREE.Scene();
-const HOME_FOV = 65;   // 滚轮缩放的复位基准
+const HOME_FOV = 65;   // 固定视场角：滚轮改的是距离，不再改 fov
 const camera = new THREE.PerspectiveCamera(HOME_FOV, innerWidth / innerHeight, 0.02, 400);
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
@@ -117,26 +116,60 @@ const home = {
   pitch: hasHome ? homeParam[4] : 0,
   fov: HOME_FOV,
 };
+// 轨道相机：绕 target 旋转、按 distance 拉近拉远。target 放在视线前方，
+// 所以初始观感仍是「站在原地环视」，拉远后它又近似场景中心，可以环看整个模型。
 let yaw = home.yaw;
 let pitch = home.pitch;
-let speedScale = 1;
+let distance = 2;        // 相机到 target 的距离（米）
+let sceneRadius = 4;     // 场景尺度：优先 ?radius=（相机轨迹半径），其次高斯点包围盒
+let maxDistance = 20;    // 拉远上限；保证一定能拉到看见整体
+const target = new THREE.Vector3();
+const forward = new THREE.Vector3();
+const panRight = new THREE.Vector3();
+const panUp = new THREE.Vector3();
+const rotation = new THREE.Euler(0, 0, 0, "YXZ");
+const move = new THREE.Vector3();
+const yawOnly = new THREE.Quaternion();
+const up = new THREE.Vector3(0, 1, 0);
 const keys = new Set();
+const canvas = renderer.domElement;
+const PIVOT_DISTANCE = 2;          // 初始支点距离：视线前方 2 米
+const ORBIT_SENSITIVITY = 0.004;   // 弧度 / 像素
+const PITCH_LIMIT = 1.5;           // 上下限约 86°，防止万向节翻转；左右不夹紧，可转满 360°
+const ZOOM_STEP = 1.15;            // 每格滚轮缩放 15%
+const MIN_DISTANCE = 0.1;
+const MOVE_SPEED = 1.6;            // 米 / 秒，固定速度
+
+/** 相机朝向，与 Euler(pitch, yaw, 0) 的局部 -Z 一致。 */
+function forwardVector() {
+  const horizontal = Math.cos(pitch);
+  return forward.set(-Math.sin(yaw) * horizontal, Math.sin(pitch), -Math.cos(yaw) * horizontal);
+}
+
+/** 由 yaw / pitch / distance / target 反推相机位置与朝向。 */
+function updateCamera() {
+  camera.quaternion.setFromEuler(rotation.set(pitch, yaw, 0));
+  camera.position.copy(target).addScaledVector(forwardVector(), -distance);
+}
 
 function reset() {
   keys.clear();
-  camera.position.copy(home.position);
-  yaw = home.yaw;
-  pitch = home.pitch;
   camera.fov = home.fov;
   camera.updateProjectionMatrix();
+  yaw = home.yaw;
+  pitch = home.pitch;
+  distance = PIVOT_DISTANCE;
+  target.copy(home.position).addScaledVector(forwardVector(), distance);
+  updateCamera();
 }
 
+// 先按 URL 里的尺度定好缩放上限，再摆初始机位（场景加载失败也不影响）。
+updateSceneScale();
 document.getElementById("reset").onclick = reset;
-document.getElementById("speed").oninput = (event) => { speedScale = Number(event.target.value); };
 reset();
 
 addEventListener("keydown", (event) => {
-  if (["KeyW", "KeyA", "KeyS", "KeyD", "ShiftLeft", "ShiftRight", "ControlLeft", "ControlRight"].includes(event.code)) {
+  if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
     event.preventDefault();
     keys.add(event.code);
   }
@@ -144,17 +177,27 @@ addEventListener("keydown", (event) => {
 addEventListener("keyup", (event) => keys.delete(event.code));
 addEventListener("blur", () => keys.clear());
 
-const canvas = renderer.domElement;
-const DRAG_SENSITIVITY = 0.0028;
-const FOV_MIN = 20;
-const FOV_MAX = 100;
-const FOV_STEP = 2.5;   // 每格滚轮 2.5°，约 18 格走完 20–100
-
 let dragId = null;
 let dragButton = -1;
 
+/** 右键：yaw 与 pitch 同时改，所以上下左右都能转。 */
+function orbit(dx, dy) {
+  yaw -= dx * ORBIT_SENSITIVITY;
+  pitch = THREE.MathUtils.clamp(pitch - dy * ORBIT_SENSITIVITY, -PITCH_LIMIT, PITCH_LIMIT);
+  updateCamera();
+}
+
+/** 左键：相机与 target 一起在屏幕平面内平移；位移随距离缩放，保证跟手。 */
+function pan(dx, dy) {
+  const perPixel = 2 * distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2) / canvas.clientHeight;
+  panRight.set(1, 0, 0).applyQuaternion(camera.quaternion);
+  panUp.set(0, 1, 0).applyQuaternion(camera.quaternion);
+  target.addScaledVector(panRight, -dx * perPixel).addScaledVector(panUp, dy * perPixel);
+  updateCamera();
+}
+
 canvas.addEventListener("pointerdown", (event) => {
-  // 左键(0) 只转 yaw，右键(2) 只转 pitch；其余按键忽略。
+  // 左键(0) 平移，右键(2) 360° 旋转；其余按键忽略。
   if (event.button !== 0 && event.button !== 2) return;
   dragId = event.pointerId;
   dragButton = event.button;
@@ -162,11 +205,8 @@ canvas.addEventListener("pointerdown", (event) => {
 });
 canvas.addEventListener("pointermove", (event) => {
   if (event.pointerId !== dragId) return;
-  if (dragButton === 0) {
-    yaw -= event.movementX * DRAG_SENSITIVITY;
-  } else if (dragButton === 2) {
-    pitch = THREE.MathUtils.clamp(pitch - event.movementY * DRAG_SENSITIVITY, -1.45, 1.45);
-  }
+  if (dragButton === 0) pan(event.movementX, event.movementY);
+  else if (dragButton === 2) orbit(event.movementX, event.movementY);
 });
 function endDrag() {
   dragId = null;
@@ -176,15 +216,16 @@ for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
   canvas.addEventListener(type, endDrag);
 }
 
-// 右键要用于俯仰，必须阻止浏览器右键菜单。
+// 右键要用于旋转，必须阻止浏览器右键菜单。
 canvas.addEventListener("contextmenu", (event) => event.preventDefault());
 
-// 滚轮改 FOV（相机位置不动）；passive:false 才允许 preventDefault 阻止页面滚动。
+// 滚轮缩放：改相机到 target 的距离。拉到 maxDistance 时整个模型都在视野内。
+// passive:false 才允许 preventDefault 阻止页面滚动。
 canvas.addEventListener("wheel", (event) => {
   event.preventDefault();
-  camera.fov = THREE.MathUtils.clamp(
-    camera.fov + Math.sign(event.deltaY) * FOV_STEP, FOV_MIN, FOV_MAX);
-  camera.updateProjectionMatrix();
+  const factor = event.deltaY > 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+  distance = THREE.MathUtils.clamp(distance * factor, MIN_DISTANCE, maxDistance);
+  updateCamera();
 }, { passive: false });
 
 // 自动化验证钩子：仅在 ?debug=1 时暴露只读状态，正常使用完全无感。
@@ -194,7 +235,10 @@ if (new URLSearchParams(location.search).get("debug") === "1") {
     get pitch() { return pitch; },
     get fov() { return camera.fov; },
     get position() { return camera.position.toArray(); },
-    get speedScale() { return speedScale; },
+    get distance() { return distance; },
+    get target() { return target.toArray(); },
+    get sceneRadius() { return sceneRadius; },
+    get maxDistance() { return maxDistance; },
     get sceneQuaternion() { return splat.quaternion.toArray(); },
   };
 }
@@ -207,16 +251,33 @@ function resize() {
 addEventListener("resize", resize);
 resize();
 
-const rotation = new THREE.Euler(0, 0, 0, "YXZ");
-const move = new THREE.Vector3();
-const yawOnly = new THREE.Quaternion();
-const up = new THREE.Vector3(0, 1, 0);
+/** 场景尺度决定拉远上限。优先用工作台传的相机轨迹尺度（?radius=），
+ *  没有时退回高斯点的包围盒——但 3DGS 常有远处漂浮点，包围盒会被撑大。 */
+function updateSceneScale() {
+  const fromUrl = Number(new URLSearchParams(location.search).get("radius"));
+  if (Number.isFinite(fromUrl) && fromUrl > 0) return setSceneRadius(fromUrl);
+
+  let box;
+  try { box = splat.getBoundingBox(); } catch { return; }
+  if (!box || box.isEmpty()) return;
+  const radius = box.getBoundingSphere(new THREE.Sphere()).radius;
+  if (!Number.isFinite(radius) || radius <= 0) return;
+  setSceneRadius(radius);
+}
+
+function setSceneRadius(radius) {
+  sceneRadius = radius;
+  maxDistance = Math.max(radius * 3, 20);   // 拉到上限时模型整体必然在视野内
+  camera.far = Math.max(400, maxDistance * 1.5);
+  camera.updateProjectionMatrix();
+}
 
 try {
   const timeout = new Promise((_, reject) =>
     setTimeout(() => reject(new Error("场景初始化超时（60 秒）")), 60000));
   await Promise.race([splat.initialized, timeout]);
   applySceneBasis();   // 再设一次，避免 Spark 在加载过程中重置网格变换
+  updateSceneScale();  // ?radius= 缺失时改用实测包围盒；两者都不改当前机位
   loading.style.display = "none";
   status.textContent = "场景已就绪 · 本地加载";
 } catch (error) {
@@ -229,19 +290,17 @@ renderer.setAnimationLoop((time) => {
   const delta = Math.min((time - previous) / 1000, 0.05);
   previous = time;
 
-  camera.quaternion.setFromEuler(rotation.set(pitch, yaw, 0));
   move.set(
     Number(keys.has("KeyD")) - Number(keys.has("KeyA")),
     0,
     Number(keys.has("KeyS")) - Number(keys.has("KeyW")),
   );
   if (move.lengthSq() > 0) {
-    let multiplier = speedScale;
-    if (keys.has("ShiftLeft") || keys.has("ShiftRight")) multiplier *= 4;
-    if (keys.has("ControlLeft") || keys.has("ControlRight")) multiplier *= 0.25;
+    // WASD 把相机与支点一起平移，速度固定（不再有加速 / 减速）。
     yawOnly.setFromAxisAngle(up, yaw);
     move.normalize().applyQuaternion(yawOnly);
-    camera.position.addScaledVector(move, delta * 1.6 * multiplier);
+    target.addScaledVector(move, delta * MOVE_SPEED);
+    updateCamera();
   }
   renderer.render(scene, camera);
 });

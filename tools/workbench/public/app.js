@@ -123,7 +123,7 @@ function renderForm() {
   $("sourceHint").textContent = state.sourcePath ? "" : "支持 JPG / PNG / WEBP / HEIC / TIFF，至少 2 张。";
 }
 
-/** Viewer URL, carrying the reconstruction-derived pose and upright basis. */
+/** Viewer URL, carrying the reconstruction-derived pose, upright basis and scale. */
 function viewerUrl(project, stamp) {
   const pose = project.scene?.home;
   let extra = "";
@@ -131,6 +131,10 @@ function viewerUrl(project, stamp) {
     extra += `&home=${[...pose.position, pose.yaw, pose.pitch].map((value) => value.toFixed(4)).join(",")}`;
     if (pose.basis) {
       extra += `&basis=${pose.basis.flat().map((value) => value.toFixed(5)).join(",")}`;
+    }
+    // 缩放上限用相机轨迹尺度，不用高斯点包围盒（后者常被漂浮点撑大）。
+    if (Number.isFinite(pose.extent) && pose.extent > 0) {
+      extra += `&radius=${pose.extent.toFixed(4)}`;
     }
   }
   return `/viewer.html?scene=/api/projects/${project.id}/scene.ply&t=${stamp}${extra}`;
