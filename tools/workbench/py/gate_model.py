@@ -6,20 +6,89 @@ data, not an error: this script exits 0 whenever the analysis ran, and writes th
 decision to <out>/gate.json.  Exit 1 only if the analysis itself could not run.
 """
 import argparse
+import hashlib
 import json
+import math
 import sqlite3
 import sys
 from pathlib import Path
+from contextlib import closing
 
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO / "scripts"))
 
-from check_model import images, points  # noqa: E402 - needs the path tweak above
+from check_model import images, points, unpack  # noqa: E402 - needs the path tweak above
+
+
+def geometry_components(folder, views):
+    """Connect cameras only through retained 3D point observations."""
+    names = {view['id']: view['name'] for view in views}
+    parent = {image_id: image_id for image_id in names}
+
+    def find(image_id):
+        while parent[image_id] != image_id:
+            parent[image_id] = parent[parent[image_id]]
+            image_id = parent[image_id]
+        return image_id
+
+    with (folder / 'points3D.bin').open('rb') as handle:
+        count, = unpack(handle, 'Q')
+        for _ in range(count):
+            unpack(handle, 'QdddBBBd')
+            length, = unpack(handle, 'Q')
+            ids = [unpack(handle, 'ii')[0] for _ in range(length)]
+            if any(image_id not in names for image_id in ids):
+                raise ValueError('三维点引用了不存在的相机')
+            if ids:
+                root = find(ids[0])
+                for image_id in ids[1:]:
+                    parent[find(image_id)] = root
+    groups = {}
+    for image_id in names:
+        groups.setdefault(find(image_id), []).append(image_id)
+    groups = sorted(groups.values(), key=lambda ids: (-len(ids), sorted(names[i] for i in ids)))
+    return [{'index': index, 'registered': len(ids), 'imageIds': sorted(ids),
+             'images': sorted(names[i] for i in ids)} for index, ids in enumerate(groups)]
+
+
+def geometry_signature(folder):
+    digest = hashlib.sha256()
+    for name in ('cameras.bin', 'images.bin', 'points3D.bin'):
+        if name == 'cameras.bin' and not (folder/name).exists():
+            continue
+        with (folder/name).open('rb') as handle:
+            for block in iter(lambda: handle.read(1024*1024), b''):
+                digest.update(block)
+    return digest.hexdigest()
+
+
+def bridge_candidates(database_path, models):
+    memberships = {}
+    for model in models:
+        for component in model['geometryComponents']:
+            for name in component['images']:
+                memberships.setdefault(name, set()).add((model['name'], component['index']))
+    labels = {2: '已校准', 3: '未校准', 4: '平面', 5: '纯旋转', 6: '平面或纯旋转', 7: '水印'}
+    candidates = []
+    with closing(sqlite3.connect(database_path.resolve().as_uri()+'?mode=ro', uri=True)) as database:
+        names = dict(database.execute('select image_id,name from images'))
+        for pair, count, config in database.execute('select pair_id,rows,config from two_view_geometries where rows>0 order by rows desc,pair_id'):
+            second = pair % 2147483647
+            first = (pair-second)//2147483647
+            a, b = names.get(first), names.get(second)
+            groups_a, groups_b = memberships.get(a, set()), memberships.get(b, set())
+            if not groups_a or not groups_b or groups_a & groups_b:
+                continue
+            candidates.append({'first': a, 'second': b, 'inliers': count, 'configuration': labels.get(config, str(config)),
+                               'requiresReview': True})
+            if len(candidates) >= 24:
+                break
+    return candidates
 
 
 def strong_components(database_path):
     """Connected components of the strong (>=30 inlier) match graph."""
-    with sqlite3.connect(f"file:{database_path.as_posix()}?mode=ro", uri=True) as database:
+    with closing(sqlite3.connect(database_path.resolve().as_uri()+'?mode=ro', uri=True)) as database:
         info = {
             "image_count": database.execute("select count(*) from images").fetchone()[0],
             "camera_count": database.execute("select count(*) from cameras").fetchone()[0],
@@ -89,6 +158,7 @@ def main():
             for view in views
         }
         stats = points(folder / "points3D.bin")
+        components = geometry_components(folder, views)
         models.append({
             "name": folder.name,
             "registered": len(views),
@@ -96,6 +166,9 @@ def main():
             "mean_reprojection_error": stats["mean_reprojection_error"],
             "mean_track_length": stats["mean_track_length"],
             "points": stats["count"],
+            "geometryComponentSizes": [c['registered'] for c in components],
+            "geometryComponents": components,
+            "geometrySignature": geometry_signature(folder),
             "unregistered": sorted(
                 name[len("images/"):] if name.startswith("images/") else name
                 for name in expected
@@ -106,9 +179,11 @@ def main():
 
     database_info = {"image_count": 0, "camera_count": 0, "verified_pairs": 0,
                      "strong_pair_components": []}
+    candidates = []
     if args.database.exists():
         try:
             database_info = strong_components(args.database)
+            candidates = bridge_candidates(args.database, models)
         except sqlite3.Error as error:
             print(f"读取特征数据库失败：{error}", file=sys.stderr)
 
@@ -135,7 +210,16 @@ def main():
             sizes = "、".join(f"模型 {m['name']} 注册 {m['registered']} 张" for m in [largest] + splits)
             message = (
                 f"稀疏重建分裂为 {1 + len(splits)} 个互不连通的模型（{sizes}），已中止训练。"
-                "这些模型之间缺少重叠视角：请在断开处补拍连续、重叠约 70%–80% 的照片后重跑。"
+                "请检查跨区域匹配，或选择一个经过检查的独立区域继续。"
+            )
+        elif len(largest['geometryComponents']) != 1:
+            sizes = largest['geometryComponentSizes']
+            substantial = [size for size in sizes if size >= threshold]
+            verdict = 'split' if len(substantial) > 1 else 'weak'
+            message = (
+                f"模型 {largest['name']} 的最终几何包含 {len(sizes)} 个独立分量"
+                f"（照片数量：{'、'.join(map(str, sizes))}），已中止整体训练。"
+                "分量之间没有共享三维点，整体布局未验证。可选择一个独立区域继续。"
             )
         elif largest["registration_ratio"] < args.min_ratio:
             verdict = "weak"
@@ -144,10 +228,12 @@ def main():
                 f"（{largest['registration_ratio']:.0%}，低于 {args.min_ratio:.0%}），已中止训练。"
                 "通常意味着照片重叠不足或存在大量模糊/重复纹理，建议提高重叠度后重拍。"
             )
-        elif (largest["mean_reprojection_error"] or 0) > args.max_error:
+        elif (largest["mean_reprojection_error"] is None
+              or not math.isfinite(largest["mean_reprojection_error"])
+              or largest["mean_reprojection_error"] > args.max_error):
             verdict = "weak"
             message = (
-                f"重投影误差 {largest['mean_reprojection_error']:.2f} px 高于阈值 {args.max_error:.2f} px，"
+                f"重投影误差无效或高于阈值 {args.max_error:.2f} px，"
                 "重建几何不可靠，已中止训练。"
             )
         elif largest["points"] < args.min_points:
@@ -166,6 +252,9 @@ def main():
                 message += f" 另有 {len(fragments)} 个碎片模型已丢弃。"
 
     gate = {
+        "geometryValidationVersion": 1,
+        "geometryConnected": bool(models and len(models[0]['geometryComponents']) == 1),
+        "bridgeCandidates": candidates,
         "verdict": verdict,
         "message": message,
         "selectedModel": selected,
@@ -180,7 +269,8 @@ def main():
     (args.out / "gate.json").write_text(json.dumps(gate, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(json.dumps({"verdict": verdict, "selectedModel": selected,
-                      "models": [{k: v for k, v in m.items() if k != "unregistered"} for m in models],
+                      "models": [{k: v for k, v in m.items()
+                                  if k not in ("unregistered", "geometryComponents")} for m in models],
                       "strongComponentSizes": gate["strongComponentSizes"]},
                      indent=2, ensure_ascii=False))
     return 0

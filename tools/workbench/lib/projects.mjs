@@ -1,13 +1,13 @@
 // Project store: one directory per project under <repo>/projects.
 import { spawn } from "node:child_process";
 import {
-  existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { resolve } from "node:path";
 import { PROJECTS_DIR, WORKBENCH } from "./paths.mjs";
 import {
-  CAMERA_MODELS, STEP_ORDER, TRAINING_PRESETS, dirs, globalProgress, readGate, sparseModels,
+  CAMERA_MODELS, FEATURE_PRESETS, STEP_ORDER, TRAINING_PRESETS, dirs, geometrySignature, globalProgress, readGate, sparseModels,
 } from "./pipeline.mjs";
 import { scenePose } from "./pose.mjs";
 
@@ -113,13 +113,19 @@ function markPendingFrom(project, stepId) {
   }
 }
 
-const PATCHABLE = ["useGpu", "cameraModel", "trainingPreset", "selectedModel", "mapper"];
+const PATCHABLE = ["useGpu", "cameraModel", "featurePreset", "trainingPreset", "selectedModel", "mapper"];
 
 export function update(id, patch) {
   const project = read(id);
   const running = ["running", "aborting"].includes(project.state);
   const applied = [];
   const blocked = [];
+  if (project.componentSource && ["cameraModel", "featurePreset", "mapper"].some(key => key in patch)) {
+    throw Object.assign(new Error("独立区域项目使用已验证的相机和几何参数，不能修改重建参数。"), { code: 409 });
+  }
+  if ("cameraModel" in patch && !CAMERA_MODELS.includes(patch.cameraModel)) {
+    throw Object.assign(new Error("未知相机模型"), { code: 400 });
+  }
 
   if (typeof patch.name === "string") {
     const label = patch.name.trim();
@@ -148,6 +154,12 @@ export function update(id, patch) {
       if (patch.cameraModel !== project.cameraModel) {
         project.cameraModel = patch.cameraModel;
         // Intrinsics changed: every step that consumed them must run again.
+        markPendingFrom(project, "features");
+      }
+    } else if (key === "featurePreset") {
+      if (!FEATURE_PRESETS.includes(patch.featurePreset)) throw Object.assign(new Error("未知特征档位"), { code: 400 });
+      if (patch.featurePreset !== (project.featurePreset ?? "standard")) {
+        project.featurePreset = patch.featurePreset;
         markPendingFrom(project, "features");
       }
     } else if (key === "selectedModel") {
@@ -211,6 +223,8 @@ export function summarise(project) {
     cameraModel: project.cameraModel,
     selectedModel: project.selectedModel ?? null,
     mapper: project.mapper ?? "incremental",
+    featurePreset: project.featurePreset ?? "standard",
+    componentSource: project.componentSource ?? null,
     createdAt: project.createdAt,
     updatedAt: project.updatedAt,
     currentStep: project.currentStep ?? null,
@@ -245,7 +259,7 @@ export function countImages(folder) {
   }
 }
 
-export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental" }) {
+export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental", featurePreset = "standard" }) {
   ensureStore();
   const label = String(name ?? "").trim();
   if (!label) throw Object.assign(new Error("请填写项目名称"), { code: 400 });
@@ -265,6 +279,8 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
   if (!["incremental", "global"].includes(mapper)) {
     throw Object.assign(new Error(`未知重建方式：${mapper}`), { code: 400 });
   }
+  if (!CAMERA_MODELS.includes(cameraModel)) throw Object.assign(new Error("未知相机模型"), { code: 400 });
+  if (!FEATURE_PRESETS.includes(featurePreset)) throw Object.assign(new Error("未知特征档位"), { code: 400 });
 
   const id = `${slugify(label)}-${randomBytes(3).toString("hex")}`;
   const now = new Date().toISOString();
@@ -281,12 +297,77 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
     cameraModel,
     selectedModel: null,
     mapper,
+    featurePreset,
     forcePrepare: false,
     steps: STEP_ORDER.map(({ id: stepId, name: stepName }) => ({ id: stepId, name: stepName, status: "pending", progress: 0 })),
     lastError: null,
   };
   mkdirSync(resolve(PROJECTS_DIR, id), { recursive: true });
   return write(project);
+}
+
+/** Snapshot an inspected component into a new project; the source stays intact. */
+export function createComponent(id, { model: modelName, component: componentIndex }) {
+  const source = read(id);
+  if (["running", "aborting"].includes(source.state)) throw Object.assign(new Error("源项目正在运行"), { code: 409 });
+  const gate = readGate(source);
+  if (gate?.geometryValidationVersion !== 1 || gate.verdict === "unverified") {
+    throw Object.assign(new Error("几何连接未验证，请先运行几何检查"), { code: 409 });
+  }
+  if (!sparseModels(source).includes(modelName) || !Number.isInteger(componentIndex)) {
+    throw Object.assign(new Error("独立区域选择无效"), { code: 400 });
+  }
+  const model = gate.models.find(entry => entry.name === modelName);
+  const component = model?.geometryComponents?.find(entry => entry.index === componentIndex);
+  if (!component || component.registered < 3) throw Object.assign(new Error("该区域至少需要三张已定位照片"), { code: 400 });
+  const input = resolve(dirs(source).sparse, modelName);
+  if (geometrySignature(input) !== model.geometrySignature) {
+    throw Object.assign(new Error("几何报告已过期，请重新运行几何检查"), { code: 409 });
+  }
+  const manifest = JSON.parse(readFileSync(resolve(dirs(source).root, "manifest.json"), "utf8"));
+  const names = new Set(component.images);
+  const records = manifest.records.filter(record => !record.excluded && names.has(record.work_image?.replace(/^images\//, "")));
+  if (records.length !== names.size) throw Object.assign(new Error("照片清单与几何分量不一致"), { code: 409 });
+  const newId = `${slugify(source.name).slice(0, 25)}-region-${componentIndex + 1}-${randomBytes(3).toString("hex")}`;
+  const project = structuredClone(source);
+  project.id = newId;
+  project.name = `${source.name} · 模型 ${modelName} · 区域 ${componentIndex + 1}`;
+  project.createdAt = new Date().toISOString();
+  project.state = "partial";
+  project.currentStep = null;
+  project.lastError = null;
+  project.selectedModel = null;
+  project.sourceImageCount = records.length;
+  project.componentSource = { projectId: id, model: modelName, index: componentIndex, images: component.images,
+    layoutVerified: false };
+  delete project.childPid;
+  const d = dirs(project);
+  mkdirSync(d.root);
+  try {
+    mkdirSync(d.sfm, { recursive: true });
+    cpSync(input, resolve(d.sfm, "component-source"), { recursive: true });
+    writeFileSync(resolve(d.sfm, "component-selection.json"), JSON.stringify(component));
+    for (const record of records) {
+      const name = record.work_image.replace(/^images\//, "");
+      // Names come from COLMAP, but must still stay inside both image directories.
+      if (name.includes("\\") || name.split("/").some(part => part === ".." || part === "" || part.includes(":"))) {
+        throw Object.assign(new Error("照片路径无效"), { code: 400 });
+      }
+      const target = resolve(d.images, name);
+      mkdirSync(resolve(target, ".."), { recursive: true });
+      copyFileSync(resolve(dirs(source).images, name), target);
+    }
+    const groups = {};
+    for (const record of records) groups[record.camera_group] = (groups[record.camera_group] ?? 0) + 1;
+    writeFileSync(resolve(d.root, "manifest.json"), JSON.stringify({ ...manifest, source_count: records.length,
+      retained_count: records.length, excluded: [], camera_groups: groups, records }, null, 2));
+    project.steps = STEP_ORDER.map((step, index) => ({ ...step, status: index < 3 ? "success" : "pending",
+      progress: index < 3 ? 1 : 0, error: null, ...(index < 3 ? { note: "复用已定位的独立区域数据" } : {}) }));
+    return write(project);
+  } catch (error) {
+    rmSync(d.root, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export function remove(id) {

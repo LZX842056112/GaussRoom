@@ -186,6 +186,8 @@ function renderProject() {
     project.sourceDir,
     `相机模型 ${project.cameraModel}`,
     `重建方式 ${project.mapper === "global" ? "全局式" : "增量式"}`,
+    `特征 ${project.featurePreset === "enhanced" ? "增强" : "标准"}`,
+    project.componentSource ? "独立区域；整体布局未验证" : "",
     project.useGpu ? "GPU 加速" : "仅 CPU",
     modelInfo,
   ].filter(Boolean).join(" · ");
@@ -195,7 +197,10 @@ function renderProject() {
     $("editName").value = project.name;
     $("editGpu").checked = Boolean(project.useGpu);
     $("editCamera").value = project.cameraModel;
-    $("editHint").textContent = "改动相机模型会把 features 及其之后的步骤标记为待运行（内参变了，下游结果作废）。";
+    $("editFeatures").value = project.featurePreset ?? "standard";
+    $("editCamera").disabled = Boolean(project.componentSource);
+    $("editFeatures").disabled = Boolean(project.componentSource);
+    $("editHint").textContent = "修改相机模型或特征档位后，需要重新提取特征，并重跑后续步骤。独立区域项目使用已定位的数据。";
   }
 
   const running = project.state === "running" || project.state === "aborting";
@@ -225,6 +230,9 @@ function renderProject() {
   if (project.state === "failed" || project.state === "aborted") {
     banner.className = "banner failed";
     banner.textContent = project.lastError ?? "重建失败";
+  } else if (!running && project.gate && project.gate.verdict !== "pass") {
+    banner.className = "banner warn";
+    banner.textContent = project.gate.message;
   } else if (project.state === "done") {
     banner.className = "banner done";
     banner.textContent = `重建完成：export_${project.scene?.step}（${formatBytes(project.scene?.size)}）`;
@@ -285,7 +293,7 @@ function connectEvents(id) {
     state.project = JSON.parse(event.data);
     renderProject();
     loadProjects().catch(() => {});
-    if (["done", "failed", "aborted"].includes(state.project.state)) refreshEvidence();
+    if (["done", "failed", "aborted", "partial"].includes(state.project.state)) refreshEvidence();
   });
 
   source.addEventListener("progress", (event) => {
@@ -335,10 +343,27 @@ async function refreshEvidence() {
       </tbody></table>`);
       if (multi) {
         blocks.push(`<p class="muted">稀疏重建分裂成多个模型时，工作台默认中止。若无法补拍，有两条路：`
-          + `① 挑一个模型继续（跳过门禁，直接从「去畸变」开始）；`
-          + `② 改用全局式重建重跑稀疏重建 —— 全局式 SfM 联合求解所有相机位姿，`
-          + `不会像增量式那样把场景拆开，但会清空现有稀疏模型并需要重跑去畸变与训练。</p>`);
-        blocks.push(`<p><button id="useGlobalMapper">改用全局式重建重跑</button></p>`);
+          + `① 将一个独立区域复制到新项目，检查通过后训练；`
+          + `② 校准相机后尝试全局式重建。全局式也可能产生独立区域。</p>`);
+        if (!state.project.componentSource) blocks.push(`<p><button id="useGlobalMapper">改用全局式重建重跑</button></p>`);
+      }
+      if (gate.geometryValidationVersion === 1) {
+        blocks.push(`<p>最终几何分量（通过共享三维点检查）：</p>`);
+        for (const model of gate.models) {
+          for (const component of model.geometryComponents ?? []) {
+            blocks.push(`<details><summary>模型 ${escapeHtml(model.name)} · 区域 ${component.index + 1}：${component.registered} 张照片</summary>`
+              + `<p class="muted">${component.images.map(escapeHtml).join("、")}</p>`
+              + (component.registered >= 3 ? `<button class="use-component" data-model="${escapeHtml(model.name)}" data-component="${component.index}">复制此区域并检查</button>` : "")
+              + `</details>`);
+          }
+        }
+      } else {
+        blocks.push(`<p>几何连接未验证。请重试「几何门禁」步骤。</p>`);
+      }
+      if (gate.bridgeCandidates?.length) {
+        blocks.push(`<details><summary>跨区域候选照片：需要人工确认共同内容</summary><p class="muted">匹配点数量不能证明房间连接正确。请检查门框、墙角和固定家具，排除相似地砖。</p>`
+          + gate.bridgeCandidates.map(pair => `<div class="bridge-pair"><p>${escapeHtml(pair.first)} ↔ ${escapeHtml(pair.second)}：${pair.inliers} 个匹配点；${escapeHtml(pair.configuration)}</p>`
+            + [pair.first, pair.second].map(name => `<a target="_blank" rel="noopener" href="/api/projects/${state.project.id}/image?name=${encodeURIComponent(name)}"><img loading="lazy" alt="${escapeHtml(name)}" src="/api/projects/${state.project.id}/image?name=${encodeURIComponent(name)}"></a>`).join("") + `</div>`).join("") + `</details>`);
       }
       if (gate.strongComponentSizes?.length) {
         blocks.push(`<p class="muted">强匹配连通分量大小：${gate.strongComponentSizes.join("、")}</p>`);
@@ -357,7 +382,10 @@ async function refreshEvidence() {
     }
     $("evidence").innerHTML = blocks.join("") || "<p class='muted'>暂无证据数据。</p>";
     for (const button of $("evidence").querySelectorAll("button.use-model")) {
-      button.onclick = () => continueWithModel(button.dataset.model);
+      button.remove();
+    }
+    for (const button of $("evidence").querySelectorAll("button.use-component")) {
+      button.onclick = () => continueWithComponent(button.dataset.model, Number(button.dataset.component));
     }
     const globalButton = $("useGlobalMapper");
     if (globalButton) globalButton.onclick = () => rerunWithGlobalMapper();
@@ -371,31 +399,24 @@ async function refreshEvidence() {
  * The gate stops on a split reconstruction. When the photos cannot be retaken, the
  * user can still pick one of the sparse models and train that.
  */
-async function continueWithModel(modelName) {
-  const ok = confirm(
-    `将改用稀疏模型「${modelName}」继续重建。\n\n`
-    + "这会跳过门禁检查，从「去畸变」开始，用该模型训练场景；"
-    + "已经跑过的步骤和已有导出都不会被删除。\n\n确定继续吗？",
-  );
-  if (!ok) return;
+async function continueWithComponent(modelName, component) {
   try {
-    await api(`/api/projects/${state.project.id}`, {
-      method: "PATCH",
-      body: JSON.stringify({ selectedModel: modelName }),
+    const created = await api(`/api/projects/${state.project.id}/components`, {
+      method: "POST",
+      body: JSON.stringify({ model: modelName, component }),
     });
-    state.project = await api(`/api/projects/${state.project.id}`);
-    renderProject();
-    await requestRun({ fromStep: "undistort" });
+    await loadProjects();
+    await openProject(created.id);
   } catch (error) {
     reportRunError(error);
   }
 }
 
-/** Rebuild the sparse model with global SfM, which does not split the scene. */
+/** Calibrate a database copy, then try global SfM. */
 async function rerunWithGlobalMapper() {
   const ok = confirm(
     "将改用「全局式重建」重跑稀疏重建。\n\n"
-    + "全局式 SfM 会联合求解所有相机位姿，不会像增量式那样把场景拆成多个模型。\n"
+    + "先校准相机，再联合求解相机位姿。仍需检查最终几何连接。\n"
     + "代价：会清空现有的稀疏模型，去畸变与训练都需要重新跑。\n\n确定继续吗？",
   );
   if (!ok) return;
@@ -513,6 +534,7 @@ $("createProject").onclick = async () => {
         useGpu: $("formGpu").checked,
         cameraModel: $("formCamera").value,
         mapper: $("formMapper").value,
+        featurePreset: $("formFeatures").value,
       }),
     });
     await loadProjects();
@@ -586,7 +608,8 @@ $("saveEdit").onclick = async () => {
       body: JSON.stringify({
         name: $("editName").value,
         useGpu: $("editGpu").checked,
-        cameraModel: $("editCamera").value,
+        ...(state.project.componentSource ? {} : { cameraModel: $("editCamera").value,
+          featurePreset: $("editFeatures").value }),
       }),
     });
     state.project = updated;

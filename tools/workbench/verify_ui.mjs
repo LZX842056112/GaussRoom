@@ -182,8 +182,8 @@ page.on("dialog", async (dialog) => {
   } catch { /* already handled */ }
 });
 
-// The workbench embeds the viewer, which would pull a 37 MB scene; stub it small.
-await page.route("**/scene.ply**", (route) => {
+// Match the PLY pathname only: viewer.html also has scene.ply in its query.
+await page.route((url) => url.pathname.endsWith("/scene.ply"), (route) => {
   const url = route.request().url();
   if (url.includes("download=1")) {
     return route.fulfill({
@@ -368,7 +368,10 @@ await test("W18", "#downloadScene 触发下载且文件名正确", async () => {
   await $(`#projectList li[data-id="${DEMO_ID}"]`).click();
   await page.waitForFunction(() => !document.getElementById("viewerCard").classList.contains("hidden"), null, { timeout: 8000 });
   const [download] = await Promise.all([
-    page.waitForEvent("download", { timeout: 10000 }),
+    page.waitForEvent("download", {
+      timeout: 10000,
+      predicate: (download) => new URL(download.url()).pathname === `/api/projects/${DEMO_ID}/scene.ply`,
+    }),
     $("#downloadScene").click(),
   ]);
   assert(/^export_\d+\.ply$/.test(download.suggestedFilename()), `文件名异常: ${download.suggestedFilename()}`);
@@ -506,6 +509,7 @@ await test("W28", "#formMapper 选全局式：落盘并在项目页显示", asyn
   await $("#formSource").fill(TEMP_SOURCE);
   await $("#formName").fill("V 全局式项目");
   await $("#formMapper").selectOption("global");
+  await $("#formFeatures").selectOption("enhanced");
   assertEqual(await $("#formMapper").inputValue(), "global", "下拉选中值");
   await $("#createProject").click();
   await page.waitForSelector("#projectView:not(.hidden)", { timeout: 15000 });
@@ -513,7 +517,14 @@ await test("W28", "#formMapper 选全局式：落盘并在项目页显示", asyn
   const globalId = ids.find((id) => !baselineIds.includes(id));
   assert(globalId, "未找到新建的项目 id");
   assertEqual((await apiGet(`/api/projects/${globalId}`)).body.mapper, "global", "mapper 落盘");
+  assertEqual((await apiGet(`/api/projects/${globalId}`)).body.featurePreset, "enhanced", "增强特征档位落盘");
   assert((await textOf("#projectMeta")).includes("重建方式 全局式"), "项目页未显示重建方式");
+  await $("#editToggle").click();
+  assertEqual(await $("#editFeatures").inputValue(), "enhanced", "编辑面板特征档位");
+  await $("#editFeatures").selectOption("standard");
+  await $("#saveEdit").click();
+  await page.waitForFunction(() => document.getElementById("editPanel").classList.contains("hidden"));
+  assertEqual((await apiGet(`/api/projects/${globalId}`)).body.featurePreset, "standard", "保存标准特征档位");
   dialogAction = "accept";
   await $("#deleteButton").click();
   await page.waitForFunction(

@@ -179,5 +179,9 @@ th { color: var(--muted); font-weight: 600; }
 
 .muted { color: var(--muted); }
 .hidden { display: none !important; }
+.bridge-pair { border-top: 1px solid var(--border); padding: 10px 0; }
+.bridge-pair img { width: min(42%, 240px); height: 220px; object-fit: contain; margin: 4px; background: #eef1f4; }
+details { margin: 8px 0; }
+details > p { overflow-wrap: anywhere; }
 h2 { font-size: 16px; margin: 0 0 4px; }
 h3 { font-size: 14px; margin: 18px 0 8px; }

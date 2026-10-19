@@ -67,8 +67,14 @@
                 <option value="global">全局式</option>
               </select>
             </label>
+            <label class="muted" style="font-size:13px">特征档位
+              <select id="formFeatures" style="width:auto;display:inline-block">
+                <option value="standard">标准：8192</option>
+                <option value="enhanced">增强：16384 + 引导匹配</option>
+              </select>
+            </label>
           </div>
-          <p class="muted" style="font-size:12px">增量式逐张注册相机，照片分组细碎或跨组重叠偏弱时可能分裂成多个模型；全局式一次性联合求解全部位姿、不会分裂。创建后仍可在验收证据里切换。</p>
+          <p class="muted" style="font-size:12px">全局式会先校准相机，再联合求解位姿。两种方式都需要可靠的跨区域匹配，都可能产生独立区域。增强特征会增加计算量。</p>
         </div>
         <div class="row">
           <button id="createProject" class="primary">创建项目</button>
@@ -106,6 +112,12 @@
                 <option value="OPENCV">OPENCV</option>
                 <option value="RADIAL">RADIAL</option>
                 <option value="PINHOLE">PINHOLE</option>
+              </select>
+            </label>
+            <label class="muted" style="font-size:13px">特征档位
+              <select id="editFeatures" style="width:auto;display:inline-block">
+                <option value="standard">标准：8192</option>
+                <option value="enhanced">增强：16384 + 引导匹配</option>
               </select>
             </label>
           </div>

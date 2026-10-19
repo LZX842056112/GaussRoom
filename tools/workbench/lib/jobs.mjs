@@ -5,6 +5,7 @@ import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { resolve } from "node:path";
+import { PY_DIR, TOOLS } from "./paths.mjs";
 import * as pipeline from "./pipeline.mjs";
 import * as projects from "./projects.mjs";
 
@@ -111,12 +112,13 @@ function spawnStep(job, step, project, cmd, args, logPath) {
     const child = spawn(cmd, args, {
       cwd: pipeline.dirs(project).root,
       windowsHide: true,
-      env: { ...process.env, ...(step.env ?? {}) },
+      env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", ...(step.env ?? {}) },
       detached: process.platform !== "win32",
     });
     job.child = child;
     // Recorded so a later boot can reap the tree if this process is hard-killed.
     project.childPid = child.pid;
+    if (cmd === TOOLS.python) project.childScript = args[0];
     persist(project);
 
     const timeoutMs = pipeline.STEP_TIMEOUT_MS[step.id] ?? 60 * 60_000;
@@ -141,6 +143,7 @@ function spawnStep(job, step, project, cmd, args, logPath) {
       pushLog(job, step.id, `\n[workbench] 无法启动进程：${error.message}\n`, logPath);
       job.child = null;
       delete project.childPid;
+      delete project.childScript;
       persist(project);
       done({ code: -1, signal: null, timedOut: false, spawnError: error.message });
     });
@@ -148,6 +151,7 @@ function spawnStep(job, step, project, cmd, args, logPath) {
       clearTimeout(timer);
       job.child = null;
       delete project.childPid;
+      delete project.childScript;
       persist(project);
       done({ code, signal, timedOut });
     });
@@ -176,17 +180,35 @@ function isAlive(pid) {
   }
 }
 
-function imageName(pid) {
+function processInfo(pid) {
   return new Promise((done) => {
-    const child = spawn("tasklist", ["/FI", `PID eq ${pid}`, "/FO", "CSV", "/NH"], { windowsHide: true });
+    if (!Number.isInteger(pid) || pid <= 0) return done(null);
+    const child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command",
+      `Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' | Select-Object Name,CommandLine | ConvertTo-Json -Compress`], { windowsHide: true });
     let out = "";
     child.stdout.on("data", (chunk) => { out += chunk; });
-    child.on("error", () => done(""));
-    child.on("close", () => done((/^"([^"]+)"/.exec(out.trim())?.[1] ?? "").toLowerCase()));
+    child.on("error", () => done(null));
+    child.on("close", () => {
+      try {
+        const info = JSON.parse(out.trim());
+        done({ name: info.Name?.toLowerCase(), commandLine: info.CommandLine ?? "" });
+      } catch { done(null); }
+    });
   });
 }
 
 const OUR_TOOLS = new Set(["colmap.exe", "brush_app.exe"]);
+const OWNED_SCRIPTS = new Set(["sparse_reconstruct.py", "extract_component.py", "prepare_project.py", "gate_model.py"]
+  .map(name => resolve(PY_DIR, name).toLowerCase()));
+
+export function isOwnedProcess(project, info) {
+  if (!info) return false;
+  if (OUR_TOOLS.has(info.name)) return true;
+  const expected = project.childScript?.replaceAll("/", "\\").toLowerCase();
+  if (!/^python(?:\d+(?:\.\d+)?)?\.exe$/.test(info.name ?? "") || !OWNED_SCRIPTS.has(expected)) return false;
+  const tokens = info.commandLine.match(/"[^"]*"|\S+/g) ?? [];
+  return tokens[1]?.replace(/^"|"$/g, "").replaceAll("/", "\\").toLowerCase() === expected;
+}
 
 /**
  * A hard kill (task manager, process tree teardown) skips the signal handler and
@@ -205,11 +227,12 @@ export async function cleanupOrphans() {
     }
     const pid = project.childPid;
     if (!pid) continue;
-    if (isAlive(pid) && OUR_TOOLS.has(await imageName(pid))) {
+    if (isAlive(pid) && isOwnedProcess(project, await processInfo(pid))) {
       await killTree(pid);
       cleaned.push({ id: project.id, pid });
     }
     delete project.childPid;
+    delete project.childScript;
     persist(project);
   }
   return cleaned;
@@ -330,9 +353,13 @@ async function run(job, project, options) {
       if (job.aborted) break;
       const step = steps[i];
       const record = project.steps[i];
+      if (step.id === "train") {
+        try { pipeline.requireTrainingDataset(project); }
+        catch (error) { halt(job, project, i, error.message); return; }
+      }
 
       if (step.clean) {
-        for (const target of step.clean(d)) {
+        for (const target of step.clean(d, project)) {
           try {
             rmSync(target, { recursive: true, force: true });
           } catch (error) {
@@ -360,7 +387,9 @@ async function run(job, project, options) {
       emitState(job.projectId, project);
 
       const logPath = resolve(d.logs, `${step.id}.log`);
-      writeFileSync(logPath, "", "utf8");
+      if (step.id === "train" && project.trainingResume) {
+        appendFileSync(logPath, `\n[workbench] 从 ${project.trainingResume.step} 步检查点恢复；保留已有导出，优化器重新初始化。\n`, "utf8");
+      } else writeFileSync(logPath, "", "utf8");
       job.logTail = [];
       job.logTailSize = 0;
 
@@ -423,6 +452,7 @@ async function run(job, project, options) {
       Object.assign(record, { status: "success", progress: 1, exitCode: 0, endedAt: new Date().toISOString() });
       persist(project);
       emitState(job.projectId, project);
+      if (options.untilStep === step.id) break;
     }
     settle(job, project);
   } finally {
@@ -436,6 +466,19 @@ export function start(projectId, options = {}) {
     throw Object.assign(new Error("已有作业在运行，请先等待完成或中止"), { code: 409 });
   }
   const project = projects.read(projectId);
+  const order = pipeline.STEP_ORDER.map(step => step.id);
+  if (options.untilStep && !order.includes(options.untilStep)) throw Object.assign(new Error("未知结束步骤"), { code: 400 });
+  const startIndex = options.fromStep ? order.indexOf(options.fromStep)
+    : project.steps.findIndex(step => step.status !== "success");
+  if (options.untilStep && order.indexOf(options.untilStep) < startIndex) {
+    throw Object.assign(new Error("结束步骤早于开始步骤，请选择有效运行范围"), { code: 400 });
+  }
+  if (options.fromStep && startIndex < 0) throw Object.assign(new Error("未知步骤"), { code: 400 });
+  if (project.componentSource && startIndex >= 0 && startIndex < order.indexOf("sparse")) {
+    throw Object.assign(new Error("独立区域项目复用已定位的数据。请从稀疏重建或几何检查继续。"), { code: 409 });
+  }
+  if (startIndex >= order.indexOf("undistort")) pipeline.requireValidatedModel(project);
+  if (startIndex === order.indexOf("train")) pipeline.requireTrainingDataset(project);
   if (options.trainingPreset && pipeline.TRAINING_PRESETS[options.trainingPreset]) {
     project.trainingPreset = options.trainingPreset;
     persist(project);
@@ -488,6 +531,11 @@ export function trainCleanWarning(project, options = {}) {
     if (startIndex < 0) return null;
   }
   if (startIndex > trainIndex) return null;
+  if (options.untilStep && order.indexOf(options.untilStep) < trainIndex) return null;
+  if (startIndex === trainIndex && project.trainingResume) {
+    pipeline.requireTrainingDataset({ ...project, trainingPreset: options.trainingPreset ?? project.trainingPreset });
+    return null;
+  }
 
   const exports = projects.trainExports(project);
   if (!exports.length) return null;

@@ -1,12 +1,12 @@
 // Reconstruction workbench: local-only HTTP service for the browser UI.
 import { createServer } from "node:http";
-import { existsSync, readFileSync, statfsSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync, statfsSync } from "node:fs";
+import { resolve, sep } from "node:path";
 import { PUBLIC_DIR, PROJECTS_DIR, REPO, TOOLS, toolStatus } from "./lib/paths.mjs";
 import { createRouter, readJson, sendJson, sendText, serveStatic, streamFile } from "./lib/http.mjs";
 import * as projects from "./lib/projects.mjs";
 import * as jobs from "./lib/jobs.mjs";
-import { GATE, TRAINING_PRESETS, dirs } from "./lib/pipeline.mjs";
+import { FEATURE_PRESETS, GATE, TRAINING_PRESETS, dirs, readGate } from "./lib/pipeline.mjs";
 
 const router = createRouter();
 const fail = (response, error) => sendJson(response, error.code ?? 500, {
@@ -34,7 +34,7 @@ router.get("/api/health", (request, response) => {
 });
 
 router.get("/api/presets", (request, response) => {
-  sendJson(response, 200, { trainingPresets: TRAINING_PRESETS, gate: GATE });
+  sendJson(response, 200, { trainingPresets: TRAINING_PRESETS, featurePresets: FEATURE_PRESETS, gate: GATE });
 });
 
 /** Step progress lives in memory while a job runs; overlay it on the on-disk record. */
@@ -70,6 +70,18 @@ router.patch("/api/projects/:id", async (request, response, { id }) => {
   try {
     const body = await readJson(request);
     sendJson(response, 200, projects.summarise(projects.update(id, body)));
+  } catch (error) {
+    fail(response, error);
+  }
+});
+
+router.post("/api/projects/:id/components", async (request, response, { id }) => {
+  try {
+    const body = await readJson(request);
+    if (jobs.anyRunning()) throw Object.assign(new Error("已有作业在运行，请等待完成后选择独立区域"), { code: 409 });
+    const project = projects.createComponent(id, body);
+    jobs.start(project.id, { fromStep: "sparse", untilStep: "gate" });
+    sendJson(response, 201, summarise(project.id));
   } catch (error) {
     fail(response, error);
   }
@@ -152,7 +164,7 @@ router.get("/api/projects/:id/summary", (request, response, { id }) => {
       }
     };
     sendJson(response, 200, {
-      gate: readOrNull("gate.json"),
+      gate: readGate(project),
       modelSummary: readOrNull("model-summary.json"),
       manifest: (() => {
         const path = resolve(dirs(project).root, "manifest.json");
@@ -172,6 +184,19 @@ router.get("/api/projects/:id/scene", (request, response, { id }) => {
     const project = projects.read(id);
     const scene = projects.latestExport(project);
     sendJson(response, 200, scene ? { ...scene, url: `/api/projects/${id}/scene.ply` } : null);
+  } catch (error) {
+    fail(response, error);
+  }
+});
+
+router.get("/api/projects/:id/image", (request, response, { id }, query) => {
+  try {
+    const root = realpathSync(dirs(projects.read(id)).images);
+    const target = realpathSync(resolve(root, query.get("name") ?? ""));
+    if (!target.startsWith(root + sep) || !/\.(jpe?g|png|webp)$/i.test(target)) {
+      throw Object.assign(new Error("照片路径无效"), { code: 400 });
+    }
+    streamFile(response, target, { head: request.method === "HEAD" });
   } catch (error) {
     fail(response, error);
   }
