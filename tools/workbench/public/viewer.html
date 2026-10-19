@@ -44,6 +44,14 @@
   <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</p>
   <div class="row">
     <button id="reset">重置视角</button>
+    <label><input id="cutToggle" type="checkbox"> 切开顶部</label>
+  </div>
+  <div class="row">
+    <label><input id="cropToggle" type="checkbox" checked> 只显示房间范围</label>
+  </div>
+  <div class="row">
+    <label>切面高度 <input id="cutHeight" type="range" min="0" max="1" step="0.001" value="0.7"></label>
+    <span id="cutValue">—</span>
   </div>
   <div id="status">等待场景…</div>
 </div>
@@ -60,7 +68,7 @@
 
 <script type="module">
 import * as THREE from "three";
-import { SparkRenderer, SplatMesh } from "@sparkjsdev/spark";
+import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf } from "@sparkjsdev/spark";
 
 const loading = document.getElementById("loading");
 const loadingDetail = document.getElementById("loadingDetail");
@@ -78,7 +86,19 @@ const camera = new THREE.PerspectiveCamera(HOME_FOV, innerWidth / innerHeight, 0
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
-scene.add(new SparkRenderer({ renderer }));
+// 拉远时画面会被「巨型针状泼溅」糊白：3DGS 训练会产出少数尺度极大的高斯
+// （本项目最大 221 单位，房间本体才 16），Spark 默认允许单个泼溅画到
+// 512px 半径 = 1024px 直径，几千个叠起来就是整屏白雾加放射状白线。
+// 所以把屏幕半径上限压下来。实测（1280×900，拉远到 23.7）：
+//   cap 512 → 平均亮度 78.4、亮像素 15.9%；cap 32 → 20.9 / 6.5%；cap 16 → 15.2 / 5.0%
+// 但太小会让巨型泼溅变成满屏麻点，所以取 32。
+// minAlpha 只做兜底（默认 ≈0.00196，提到 0.005 只丢约 0.3% 的泼溅）。
+const spark = new SparkRenderer({
+  renderer,
+  maxPixelRadius: 32,
+  minAlpha: 0.005,
+});
+scene.add(spark);
 
 // Scene URL comes from ?scene=... so the workbench can point at any project's export.
 const sceneUrl = new URLSearchParams(location.search).get("scene") || "/scene.ply";
@@ -168,6 +188,73 @@ updateSceneScale();
 document.getElementById("reset").onclick = reset;
 reset();
 
+// 切开顶部：用 SplatEdit + 平面 SDF 把「世界 Y 之上」的泼溅 alpha 乘 0（等效删除）。
+// 编辑在直立系世界坐标求值（先对象→世界变换，再应用编辑），所以平面就是水平面。
+// 用 splat.edits 而不是挂子节点：子节点会继承 basis 旋转，切割面就歪了。
+const cutEdit = new SplatEdit({ name: "cut-top", rgbaBlendMode: "multiply" });
+const cutPlane = new SplatEditSdf({ type: "plane", opacity: 0 });
+cutPlane.rotation.x = Math.PI / 2;   // 局部 +Z → 世界 −Y，于是 distance<0 恰好是 y > 切面高度
+cutEdit.sdfs = [cutPlane];
+
+// 漂浮点裁剪：3DGS 会产出少数远离场景的巨型高斯（本项目最远 66 单位、房间本体 16）。
+// 用倒置球 SDF 把「相机轨迹尺度之外」的一切挡掉——纯渲染侧，不动数据。
+// 实测到 home 的距离 p99.5 = 1.11×尺度，所以 1.2× 只切掉 0.26% 的泼溅。
+const CROP_FACTOR = 1.2;
+const cropEdit = new SplatEdit({ name: "room-crop", rgbaBlendMode: "multiply", softEdge: 0 });
+const cropSphere = new SplatEditSdf({ type: "sphere", opacity: 0, invert: true });
+cropEdit.sdfs = [cropSphere];
+
+// 默认切面高度按实测标定：世界系 Y 的 p95 ≈ home.y + 0.12×尺度（p99 为 +0.19×）。
+// 不要用 splat.getBoundingBox()——那是重建局部系，且被 Y 最高 +47.7 的漂浮点撑大。
+const CUT_DEFAULT_FACTOR = 0.15;
+const CUT_RANGE_FACTOR = 0.6;
+const cutToggle = document.getElementById("cutToggle");
+const cropToggle = document.getElementById("cropToggle");
+const cutSlider = document.getElementById("cutHeight");
+let cutHeight = home.position.y + CUT_DEFAULT_FACTOR * sceneRadius;
+let cutTouched = false;
+
+function cutRange() {
+  const span = CUT_RANGE_FACTOR * sceneRadius;
+  return [home.position.y - span, home.position.y + span];
+}
+
+/** 两个编辑都靠 splat.edits 挂载；一旦非空 Spark 就不再遍历子节点。 */
+function syncEdits() {
+  const edits = [];
+  if (cropToggle.checked) edits.push(cropEdit);
+  if (cutToggle.checked) edits.push(cutEdit);
+  splat.edits = edits.length ? edits : null;
+}
+
+/** 把 cutHeight 同步到平面与滑块（滑块是 [0,1] 的归一化位置）。 */
+function applyCutHeight() {
+  cutPlane.position.set(0, cutHeight, 0);
+  cutPlane.updateMatrixWorld(true);
+  document.getElementById("cutValue").textContent = cutHeight.toFixed(2);
+  const [low, high] = cutRange();
+  cutSlider.value = String((cutHeight - low) / (high - low));
+}
+
+/** 裁剪球半径与切面高度都随场景尺度走。 */
+function applySceneScaleToEdits() {
+  cropSphere.radius = CROP_FACTOR * sceneRadius;
+  cropSphere.position.copy(home.position);
+  cropSphere.updateMatrixWorld(true);
+}
+
+cutSlider.oninput = () => {
+  const [low, high] = cutRange();
+  cutTouched = true;
+  cutHeight = low + (high - low) * Number(cutSlider.value);
+  applyCutHeight();
+};
+cutToggle.onchange = syncEdits;
+cropToggle.onchange = syncEdits;
+applyCutHeight();
+applySceneScaleToEdits();
+syncEdits();
+
 addEventListener("keydown", (event) => {
   if (["KeyW", "KeyA", "KeyS", "KeyD"].includes(event.code)) {
     event.preventDefault();
@@ -239,6 +326,15 @@ if (new URLSearchParams(location.search).get("debug") === "1") {
     get target() { return target.toArray(); },
     get sceneRadius() { return sceneRadius; },
     get maxDistance() { return maxDistance; },
+    get maxPixelRadius() { return spark.maxPixelRadius; },
+    get minAlpha() { return spark.minAlpha; },
+    get cutEnabled() { return Array.isArray(splat.edits) && splat.edits.includes(cutEdit); },
+    get cutHeight() { return cutPlane.position.y; },
+    get cutPlaneDirection() { return new THREE.Vector3(0, 0, 1).applyQuaternion(cutPlane.quaternion).toArray(); },
+    get cropEnabled() { return Array.isArray(splat.edits) && splat.edits.includes(cropEdit); },
+    get cropRadius() { return cropSphere.radius; },
+    get editsCount() { return Array.isArray(splat.edits) ? splat.edits.length : 0; },
+    setMaxPixelRadius(value) { spark.maxPixelRadius = value; },
     get sceneQuaternion() { return splat.quaternion.toArray(); },
   };
 }
@@ -278,6 +374,12 @@ try {
   await Promise.race([splat.initialized, timeout]);
   applySceneBasis();   // 再设一次，避免 Spark 在加载过程中重置网格变换
   updateSceneScale();  // ?radius= 缺失时改用实测包围盒；两者都不改当前机位
+  // 尺度若刚刚才定下来，重算默认切面高度与裁剪球（用户已经拖过滑块就不动切面）。
+  if (!cutTouched) {
+    cutHeight = home.position.y + CUT_DEFAULT_FACTOR * sceneRadius;
+    applyCutHeight();
+  }
+  applySceneScaleToEdits();
   loading.style.display = "none";
   status.textContent = "场景已就绪 · 本地加载";
 } catch (error) {

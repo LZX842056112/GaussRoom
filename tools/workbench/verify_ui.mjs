@@ -665,8 +665,6 @@ await test("V1", "#reset 复位 yaw / pitch / fov / distance / 位置", async ()
   assertEqual(JSON.stringify(state.position), JSON.stringify([0, 1.5, 0]), "position");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-if (viewer) await viewer.close();
-
 // V8: the ?basis= parameter must rotate the scene into the upright frame.
 await test("V8", "?basis= 生效：场景被旋转，使重建的「上」对齐 +Y", async () => {
   const basis = [-1, 0, 0, 0, -1, 0, 0, 0, 1];
@@ -724,6 +722,75 @@ await test("V9", "?radius= 生效：缩放上限 = max(3×半径, 20)", async ()
   assertEqual(state.sceneRadius, 12, "sceneRadius");
   assertEqual(state.maxDistance, 36, "maxDistance");
 }, DEMO_ID ? null : "没有带场景的项目");
+
+// V10: the renderer knobs that stop giant splats from washing out the screen.
+await test("V10", "渲染参数已生效：maxPixelRadius / minAlpha 为设定值", async () => {
+  const state = await viewer.evaluate(() => ({
+    cap: window.__viewerDebug.maxPixelRadius,
+    minAlpha: window.__viewerDebug.minAlpha,
+  }));
+  assertEqual(state.cap, 32, "maxPixelRadius");
+  assertEqual(state.minAlpha, 0.005, "minAlpha");
+}, DEMO_ID ? null : "没有带场景的项目");
+
+// V11: the two SplatEdits must be wired to their toggles, with the plane aimed
+// at world -Y (otherwise the cut keeps the ceiling and deletes the room).
+await test("V11", "裁剪球默认开、切割开关挂载且切割面朝世界 −Y", async () => {
+  const base = await viewer.evaluate(() => ({
+    crop: window.__viewerDebug.cropEnabled,
+    cropRadius: window.__viewerDebug.cropRadius,
+    cut: window.__viewerDebug.cutEnabled,
+    radius: window.__viewerDebug.sceneRadius,
+  }));
+  assert(base.crop, "「只显示房间范围」默认应开启");
+  assert(Math.abs(base.cropRadius - 1.2 * base.radius) < 1e-6,
+    `裁剪球半径应为 1.2×尺度=${1.2 * base.radius}，实际 ${base.cropRadius}`);
+  assertEqual(base.cut, false, "「切开顶部」默认应关闭");
+
+  await viewer.locator("#cutToggle").check();
+  await viewer.waitForTimeout(200);
+  const on = await viewer.evaluate(() => ({
+    cut: window.__viewerDebug.cutEnabled,
+    direction: window.__viewerDebug.cutPlaneDirection,
+  }));
+  assert(on.cut, "勾选后应挂上切割编辑");
+  // 局部 +Z 必须落到世界 −Y；落到 +Y 就是把房间切掉、留下天花板。
+  assert(
+    Math.abs(on.direction[0]) < 1e-6
+    && Math.abs(on.direction[1] + 1) < 1e-6
+    && Math.abs(on.direction[2]) < 1e-6,
+    `切割面朝向错误: ${on.direction.join(",")}`,
+  );
+
+  // 两个开关都关掉时 edits 必须清空，Spark 才会回落到子节点遍历。
+  await viewer.locator("#cutToggle").uncheck();
+  await viewer.locator("#cropToggle").uncheck();
+  await viewer.waitForTimeout(200);
+  assertEqual(await viewer.evaluate(() => window.__viewerDebug.editsCount), 0, "两个开关都关应清空 edits");
+  await viewer.locator("#cropToggle").check();
+  await viewer.waitForTimeout(200);
+  assertEqual(await viewer.evaluate(() => window.__viewerDebug.editsCount), 1, "只开裁剪应剩 1 个编辑");
+}, DEMO_ID ? null : "没有带场景的项目");
+
+// V12: slider position must map linearly onto home.y ± 0.6 × sceneRadius.
+await test("V12", "切面高度滑块：线性映射到 home.y ± 0.6×场景尺度", async () => {
+  const readCut = async (value) => {
+    await viewer.locator("#cutHeight").fill(String(value));
+    await viewer.waitForTimeout(150);
+    return viewer.evaluate(() => window.__viewerDebug.cutHeight);
+  };
+  const low = await readCut(0);
+  const mid = await readCut(0.5);
+  const high = await readCut(1);
+  const radius = await viewer.evaluate(() => window.__viewerDebug.sceneRadius);
+
+  assert(Math.abs((high - low) / 2 - 0.6 * radius) < 1e-3,
+    `半跨度应为 0.6×尺度=${0.6 * radius}，实际 ${(high - low) / 2}`);
+  assert(Math.abs(mid - (low + high) / 2) < 1e-3,
+    `中点 ${mid} 不等于两端中点 ${(low + high) / 2}`);
+  assert(high > low, `切面高度范围应递增: ${low} -> ${high}`);
+}, DEMO_ID ? null : "没有带场景的项目");
+if (viewer) await viewer.close();
 await context.close();
 await browser.close();
 
