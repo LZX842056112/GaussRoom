@@ -3,7 +3,7 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '../..'))
 New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
 $env:PYTHONUTF8 = '1'
-$taskTests = (Get-ChildItem -LiteralPath $PSScriptRoot -File | Where-Object Name -Match '^test_(assistance.*|annotation|quality|quality_ui|viewer_render)\.mjs$').FullName
+$taskTests = (Get-ChildItem -LiteralPath $PSScriptRoot -File | Where-Object Name -Match '^test_(assistance.*|annotation|quality|quality_ui|viewer_render|timing.*)\.mjs$').FullName
 $ErrorActionPreference = 'Continue'
 & node --test @taskTests *> (Join-Path $LogDir 'node.log')
 $taskCode = $LASTEXITCODE

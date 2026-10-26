@@ -1,4 +1,5 @@
 import {mountAssistance} from './assistance.js';
+import {timingLabel} from './timing.mjs';
 const state = {
   view: "empty",
   projects: [],
@@ -161,7 +162,7 @@ function renderSteps(project) {
       <li data-id="${step.id}">
         <span class="dot"></span>
         <span class="step-name"><span class="label"></span><span class="note"></span><span class="err"></span></span>
-        <span class="step-state"></span>
+        <span class="step-state"><span class="step-status"></span><span class="step-duration"></span></span>
         <button class="retry" data-step="${step.id}">重试此步</button>
       </li>`).join("");
     for (const button of list.querySelectorAll("button.retry")) {
@@ -177,9 +178,23 @@ function renderSteps(project) {
     row.querySelector(".err").textContent = step.error ? ` ${step.error}` : "";
     row.querySelector(".err").style.color = step.error ? "var(--danger)" : "";
     const stateCell = row.querySelector(".step-state");
-    stateCell.textContent = stepProgressText(step);
+    stateCell.querySelector('.step-status').textContent = stepProgressText(step);
     stateCell.classList.toggle("indeterminate", step.status === "running" && !step.progress);
     row.querySelector("button.retry").disabled = project.state === "running" || project.state === "aborting";
+  });
+}
+
+// A clock tick changes only text; it must not reload the viewer or annotation UI.
+function renderTiming(project) {
+  const now = Date.now();
+  $("totalDuration").textContent = timingLabel(project.timing, now);
+  $("timingNote").textContent = '累计各阶段运行时间，包含重试；不含暂停和人工等待。'
+    + (project.timing?.complete === false ? '历史或中断记录不完整，仅显示已记录时间。' : '');
+  project.steps.forEach((step, index) => {
+    const cell = $("stepList").children[index]?.querySelector('.step-duration');
+    if (!cell) return;
+    cell.textContent = `耗时：${timingLabel(step.timing, now)}`;
+    cell.title = step.timing?.complete === false ? '历史或中断记录不完整，仅统计现有记录。' : '累计运行时间，包含重试。';
   });
 }
 
@@ -226,6 +241,7 @@ function renderProject() {
   $("globalNote").textContent = `总进度约 ${Math.round((project.progress ?? 0) * 100)}%（按各步骤权重估算，仅供参考）`;
 
   renderSteps(project);
+  renderTiming(project);
 
   $("runButton").disabled = running||project.state==='needs_input';
   $("runButton").textContent = project.steps.some((step) => step.status === "success") ? "继续重建" : "开始重建";
@@ -672,6 +688,10 @@ $("loadLog").onclick = async () => {
     $("log").textContent = `读取日志失败：${error.message}`;
   }
 };
+
+setInterval(() => {
+  if (state.view === 'project' && state.project) renderTiming(state.project);
+}, 1000);
 
 boot().catch((error) => {
   document.body.insertAdjacentHTML("afterbegin",

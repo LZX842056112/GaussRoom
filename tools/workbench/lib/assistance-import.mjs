@@ -5,6 +5,7 @@ import {createHash,randomBytes} from 'node:crypto';
 import * as projects from './projects.mjs';
 import {dirs} from './pipeline.mjs';
 import {readAssistance,newRecord,updateAssistance,validatePatch,missingInput,inputError,emptyPatch} from './assistance.mjs';
+import {preserveStepTiming} from './timing.mjs';
 const hash=value=>createHash('sha256').update(value).digest('hex');
 const PHOTO=/\.(jpe?g|png|webp|heic|heif|tiff?|bmp)$/i;
 function targetPhotos(project,catalog){
@@ -90,7 +91,10 @@ export function importPhotos(project,{expectedRevision,sourceDir}){
    const record={...previous,revision:previous.revision+1,state:'stale',verifiedAgainst:null,missing:[{code:'photos_changed',message:'已添加照片。请从照片预处理重跑，再复查原有回答和标记。'}]};
    project.photoSources=[...(project.photoSources??[project.sourceDir]),destination];project.importedPhotos=[...(project.importedPhotos??[]),...imported];project.sourceImageCount=(project.sourceImageCount??previous.photos.length)+imported.length;
    project.state='partial';project.pendingAttemptId=null;project.lastError=null;delete project.trainingResume;
-   project.steps=project.steps.map(s=>({id:s.id,name:s.name,status:'pending',progress:0}));projects.write(project);
+   project.steps=project.steps.map(s=>{
+    preserveStepTiming(s);
+    return {id:s.id,name:s.name,status:'pending',progress:0,...(s.timing?{timing:s.timing}:{})};
+   });projects.write(project);
    result={added:pending.length,duplicates,record};return record;
   });return result;
  })();

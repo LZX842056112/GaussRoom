@@ -134,7 +134,7 @@ ul#projectList .meta { color: var(--muted); font-size: 12px; margin-top: 4px; }
 ol.steps { list-style: none; margin: 0; padding: 0; }
 ol.steps li {
   display: grid;
-  grid-template-columns: 22px 1fr 130px auto;
+  grid-template-columns: 22px minmax(0, 1fr) 175px auto;
   gap: 10px;
   align-items: center;
   padding: 8px 0;
@@ -151,6 +151,10 @@ button.retry { padding: 3px 9px; font-size: 12px; }
 .step-name .note { color: var(--muted); font-size: 12px; display: block; }
 .step-state { text-align: right; color: var(--muted); font-size: 12px; }
 .step-state.indeterminate { color: var(--warn); }
+.step-duration { display: block; color: var(--muted); font-variant-numeric: tabular-nums; }
+.timing-overview { display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px 16px; margin-top: 12px; }
+.timing-overview strong { font-size: 20px; font-variant-numeric: tabular-nums; }
+.timing-note { margin: 2px 0 0; font-size: 12px; }
 
 .bar { height: 8px; background: #eaeef2; border-radius: 999px; overflow: hidden; margin: 6px 0 2px; }
 .bar > div { height: 100%; background: var(--primary); width: 0; transition: width .3s; }

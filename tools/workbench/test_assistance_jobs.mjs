@@ -39,6 +39,9 @@ test('waiting releases the slot and blocks downstream steps instead of failing',
  const {p,runtime}=fixture(t);const job=jobs.start(p.id,{fromStep:'gate',untilStep:'gate'},runtime);await finished(job);
  const after=projects.read(p.id);assert.equal(after.state,'needs_input');assert.equal(jobs.busyId(),null);
  assert.equal(after.steps.find(s=>s.id==='gate').status,'needs_input');
+ const timing=projects.summarise(after).steps.find(s=>s.id==='gate').timing;
+ assert.ok(timing.elapsedMs>=0);assert.equal(timing.running,false);
+ assert.equal(projects.summarise(after,Date.now()+86_400_000).steps.find(s=>s.id==='gate').timing.elapsedMs,timing.elapsedMs);
  assert.ok(after.steps.filter(s=>['undistort','train'].includes(s.id)).every(s=>s.status==='blocked'));
  assert.equal(readAssistance(after).state,'needs_input');assert.ok(readAssistance(after).questions.length>0);
  assert.equal(projects.latestExport(after).name,'export_30000.ply');
@@ -103,6 +106,8 @@ test('cancel preserves observations and leaves a recoverable assistance state',a
  updateAssistance(f.p,()=>({...newRecord({catalog:f.photos,inputs:f.inputs}),revision:1,state:'ready',sourceAttemptId:null,landmarks:marks}));
  const job=jobs.startAssistance(f.p.id,{expectedRevision:1},runtime);await runtime.commandReady;await jobs.abort(f.p.id);await finished(job);
  assert.equal(projects.read(f.p.id).state,'aborted');assert.deepEqual(readAssistance(f.p).landmarks,marks);
+ const timing=projects.summarise(projects.read(f.p.id)).steps.find(s=>s.id==='sparse').timing;
+ assert.ok(timing.elapsedMs>=0);assert.equal(timing.running,false);
  assert.notEqual(readAssistance(f.p).state,'solving');assert.equal(jobs.busyId(),null);
 });
 test('restart changes an interrupted solving state without losing answers',t=>{

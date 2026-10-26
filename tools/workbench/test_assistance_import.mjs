@@ -50,3 +50,16 @@ test('photo import preserves originals, old attempts and existing answers',t=>{
  assert.throws(()=>imports.importPhotos(f.p,{expectedRevision:0,sourceDir:folder}),{code:409});
  const again=imports.importPhotos(projects.read(f.p.id),{expectedRevision:1,sourceDir:folder});assert.equal(again.added,0);assert.equal(again.record.revision,1);
 });
+
+test('adding photos preserves both accumulated and legacy stage time when resetting steps',t=>{
+ const f=fixture(t),folder=resolve(f.d.root,'external-timing-source');mkdirSync(folder);writeFileSync(resolve(folder,'added.png'),'additional fixture photo');
+ f.p.steps[0].timing={elapsedMs:4500,runningSince:null,complete:true};
+ Object.assign(f.p.steps[1],{startedAt:'2026-10-26T00:00:00.000Z',endedAt:'2026-10-26T00:01:15.000Z'});projects.write(f.p);
+ imports.importPhotos(f.p,{expectedRevision:0,sourceDir:folder});
+ const result=projects.summarise(projects.read(f.p.id));
+ assert.equal(result.steps[0].status,'pending');
+ assert.equal(result.steps[0].timing.elapsedMs,4500);
+ assert.equal(result.steps[1].timing.elapsedMs,75000);
+ assert.equal(result.timing.elapsedMs,79500);
+ assert.equal(result.timing.complete,false);
+});

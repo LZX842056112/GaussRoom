@@ -13,6 +13,7 @@ import { diagnoseAssistance } from './assistance-diagnosis.mjs';
 import { readAttempt, writeAttempt, adoptAttempt, sameInputs } from './attempts.mjs';
 import { getContext, prepareAutomaticAttempt, prepareAssistedAttempt, assistanceSource } from './assistance-service.mjs';
 import {qualityFor,deriveQuality} from './quality.mjs';
+import { beginStepTiming, endStepTiming, preserveStepTiming } from './timing.mjs';
 
 const active = new Map();
 const channels = new Map();
@@ -269,8 +270,8 @@ function markDownstream(project, index, status) {
 
 function halt(job, project, index, message) {
   const record = project.steps[index];
+  endStepTiming(record);
   record.status = "failed";
-  record.endedAt = new Date().toISOString();
   record.error = message;
   markDownstream(project, index, "blocked");
   project.state = "failed";
@@ -302,7 +303,7 @@ function settle(job, project) {
 }
 
 function pauseForInput(job,project,index,missing) {
-  const record=project.steps[index];record.status='needs_input';record.endedAt=new Date().toISOString();record.error=null;
+  const record=project.steps[index];endStepTiming(record);record.status='needs_input';record.error=null;
   record.note=missing.map(m=>m.message).filter(Boolean).join(' ');
   for(let i=index+1;i<project.steps.length;i++)project.steps[i].status='blocked';
   project.state='needs_input';project.currentStep=record.id;project.lastError=null;
@@ -339,12 +340,18 @@ async function run(job, project, options) {
   }
 
   for (let i = startIndex; i < project.steps.length; i += 1) {
+    preserveStepTiming(project.steps[i]);
     Object.assign(project.steps[i], { status: "pending", progress: 0, error: null });
     delete project.steps[i].endedAt;
+    delete project.steps[i].startedAt;
   }
   project.state = "running";
   project.lastError = null;
-  project.currentStep = null;
+  const firstRecord=project.steps[startIndex];
+  beginStepTiming(firstRecord);
+  firstRecord.status='running';
+  delete firstRecord.note;
+  project.currentStep = firstRecord.id;
   persist(project);
   emitState(job.projectId, project);
 
@@ -397,6 +404,7 @@ async function run(job, project, options) {
     const record = project.steps[index];
     const started = record.startedAt ? new Date(record.startedAt).getTime() : Date.now();
     const elapsed = formatDuration(Math.max(1000, Date.now() - started));
+    persist(project); // Save an activity checkpoint so a restart excludes downtime.
     const scene = projects.latestExport(job.scopeProject);
     const detail = step.id === "train" && scene
       ? `；最近导出 ${scene.name}（${(scene.size / 1024 / 1024).toFixed(1)} MB）`
@@ -411,6 +419,14 @@ async function run(job, project, options) {
       if (job.aborted) break;
       const step = steps[i];
       const record = project.steps[i];
+      if(record.status!=='running'){
+        beginStepTiming(record);
+        Object.assign(record,{status:'running',progress:0});
+        delete record.note;
+        project.currentStep=step.id;
+        persist(project);
+        emitState(job.projectId,project);
+      }
       if (step.id === "train") {
         try { pipeline.requireTrainingDataset(job.scopeProject); }
         catch (error) { halt(job, project, i, error.message); return; }
@@ -440,13 +456,6 @@ async function run(job, project, options) {
         }
       }
 
-      Object.assign(record, { status: "running", progress: 0, startedAt: new Date().toISOString() });
-      delete record.note;
-      delete record.endedAt;
-      project.currentStep = step.id;
-      persist(project);
-      emitState(job.projectId, project);
-
       const logPath = resolve(d.logs, `${step.id}.log`);
       if (step.id === "train" && project.trainingResume) {
         appendFileSync(logPath, `\n[workbench] 从 ${project.trainingResume.step} 步检查点恢复；保留已有导出，优化器重新初始化。\n`, "utf8");
@@ -462,8 +471,8 @@ async function run(job, project, options) {
       const result = await spawnStep(job, step, project, cmd, args, logPath);
 
       if (job.aborted) {
+        endStepTiming(record);
         record.status = "aborted";
-        record.endedAt = new Date().toISOString();
         markDownstream(project, i, "blocked");
         project.state = "aborted";
         project.currentStep = null;
@@ -559,7 +568,8 @@ async function run(job, project, options) {
         if (check.note) record.note = check.note;
       }
 
-      Object.assign(record, { status: "success", progress: 1, exitCode: 0, endedAt: new Date().toISOString() });
+      endStepTiming(record);
+      Object.assign(record, { status: "success", progress: 1, exitCode: 0 });
       persist(project);
       emitState(job.projectId, project);
       if (options.untilStep === step.id) break;
@@ -619,6 +629,11 @@ export function start(projectId, options = {}, runtime = {}) {
       try {
         const latest = projects.read(projectId);
         const stale=error.staleAssistance===true;
+        for(const step of latest.steps.filter(step=>step.status==='running')){
+          endStepTiming(step);
+          step.status=job.aborted?'aborted':stale?'needs_input':'failed';
+          step.error=stale?null:error.message;
+        }
         latest.state = job.aborted ? 'aborted' : stale?'needs_input':"failed";
         latest.lastError = stale?null:error.message;
         latest.currentStep = stale?'sparse':null;

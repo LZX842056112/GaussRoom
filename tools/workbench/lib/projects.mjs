@@ -12,6 +12,7 @@ import {
 import { scenePose } from "./pose.mjs";
 import { readAssistance, updateAssistance } from './assistance.mjs';
 import {qualityFor} from './quality.mjs';
+import { endStepTiming, preserveStepTiming, projectTiming, stepTiming } from './timing.mjs';
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const IMAGE_SUFFIXES = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"]);
@@ -83,7 +84,13 @@ export function reconcileProject(id){
   let project;try{project=read(id);}catch{return false;}
   const stuckSteps=(project.steps??[]).filter(step=>step.status==='running');
   if(!['running','aborting'].includes(project.state)&&!stuckSteps.length)return false;
-  for(const step of stuckSteps){step.status='aborted';step.endedAt??=new Date().toISOString();}
+  for(const step of stuckSteps){
+    const start=Date.parse(step.timing?.runningSince??step.startedAt),saved=Date.parse(project.updatedAt);
+    const cutoff=Math.min(Date.now(),Math.max(Number.isFinite(start)?start:0,Number.isFinite(saved)?saved:Number.isFinite(start)?start:Date.now()));
+    endStepTiming(step,cutoff);
+    step.timing.complete=false; // The last unsaved interval cannot be recovered.
+    step.status='aborted';
+  }
   project.state='aborted';project.currentStep=null;
   project.lastError='工作台服务曾中断，该作业已停止；可点「继续重建」从中断处恢复。';
   try{
@@ -98,6 +105,7 @@ function markPendingFrom(project, stepId) {
   if (from < 0) return;
   for (let i = from; i < project.steps.length; i += 1) {
     const step = project.steps[i];
+    preserveStepTiming(step);
     if (step.status === "success") step.status = "pending";
     step.progress = 0;
     step.error = null;
@@ -211,7 +219,7 @@ export function list() {
   return projects.sort((a, b) => String(b.createdAt ?? "").localeCompare(String(a.createdAt ?? "")));
 }
 
-export function summarise(project) {
+export function summarise(project, now = Date.now()) {
   return {
     id: project.id,
     name: project.name,
@@ -231,8 +239,11 @@ export function summarise(project) {
     updatedAt: project.updatedAt,
     currentStep: project.currentStep ?? null,
     progress: globalProgress(project),
-    steps: project.steps.map(({ id, name, status, progress: value, error, note }) => ({
-      id, name, status, progress: value ?? 0, error: error ?? null, note: note ?? null,
+    timing: projectTiming(project, now),
+    steps: project.steps.map((step) => ({
+      id:step.id, name:step.name, status:step.status, progress:step.progress ?? 0,
+      error:step.error ?? null, note:step.note ?? null,
+      startedAt:step.startedAt ?? null, endedAt:step.endedAt ?? null, timing:stepTiming(step, now),
     })),
     gate: readGate(project),
     lastError: project.lastError ?? null,
