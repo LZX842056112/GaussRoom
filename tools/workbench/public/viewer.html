@@ -69,6 +69,7 @@
 <script type="module">
 import * as THREE from "three";
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf } from "@sparkjsdev/spark";
+import { screenRadiusLimit } from "./render-limits.mjs";
 
 const loading = document.getElementById("loading");
 const loadingDetail = document.getElementById("loadingDetail");
@@ -86,16 +87,11 @@ const camera = new THREE.PerspectiveCamera(HOME_FOV, innerWidth / innerHeight, 0
 const renderer = new THREE.WebGLRenderer({ antialias: false });
 renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
 document.body.appendChild(renderer.domElement);
-// 拉远时画面会被「巨型针状泼溅」糊白：3DGS 训练会产出少数尺度极大的高斯
-// （本项目最大 221 单位，房间本体才 16），Spark 默认允许单个泼溅画到
-// 512px 半径 = 1024px 直径，几千个叠起来就是整屏白雾加放射状白线。
-// 所以把屏幕半径上限压下来。实测（1280×900，拉远到 23.7）：
-//   cap 512 → 平均亮度 78.4、亮像素 15.9%；cap 32 → 20.9 / 6.5%；cap 16 → 15.2 / 5.0%
-// 但太小会让巨型泼溅变成满屏麻点，所以取 32。
-// minAlpha 只做兜底（默认 ≈0.00196，提到 0.005 只丢约 0.3% 的泼溅）。
+// 近距离保留完整的屏幕覆盖。拉远到场景之外后，再缩小高斯的屏幕半径，
+// 限制远处漂浮点形成的白线。相机平移、旋转和缩放都更新这个限制。
 const spark = new SparkRenderer({
   renderer,
-  maxPixelRadius: 32,
+  maxPixelRadius: 512,
   minAlpha: 0.005,
 });
 scene.add(spark);
@@ -170,6 +166,14 @@ function forwardVector() {
 function updateCamera() {
   camera.quaternion.setFromEuler(rotation.set(pitch, yaw, 0));
   camera.position.copy(target).addScaledVector(forwardVector(), -distance);
+  updateRenderLimits();
+}
+
+function updateRenderLimits() {
+  spark.maxPixelRadius = screenRadiusLimit({
+    width: innerWidth, height: innerHeight, pixelRatio: renderer.getPixelRatio(),
+    sceneRadius, cameraDistance: camera.position.distanceTo(home.position),
+  });
 }
 
 function reset() {
@@ -343,6 +347,7 @@ function resize() {
   renderer.setSize(innerWidth, innerHeight);
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+  updateRenderLimits();
 }
 addEventListener("resize", resize);
 resize();
@@ -366,6 +371,7 @@ function setSceneRadius(radius) {
   maxDistance = Math.max(radius * 3, 20);   // 拉到上限时模型整体必然在视野内
   camera.far = Math.max(400, maxDistance * 1.5);
   camera.updateProjectionMatrix();
+  updateRenderLimits();
 }
 
 try {

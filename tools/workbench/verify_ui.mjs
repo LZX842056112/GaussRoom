@@ -723,13 +723,14 @@ await test("V9", "?radius= 生效：缩放上限 = max(3×半径, 20)", async ()
   assertEqual(state.maxDistance, 36, "maxDistance");
 }, DEMO_ID ? null : "没有带场景的项目");
 
-// V10: the renderer knobs that stop giant splats from washing out the screen.
-await test("V10", "渲染参数已生效：maxPixelRadius / minAlpha 为设定值", async () => {
+// V10: walking must retain surface coverage; opacity is still read from the model.
+await test("V10", "近距离保留屏幕覆盖，透明度阈值保持不变", async () => {
   const state = await viewer.evaluate(() => ({
     cap: window.__viewerDebug.maxPixelRadius,
     minAlpha: window.__viewerDebug.minAlpha,
+    diagonal: Math.hypot(innerWidth, innerHeight) * Math.min(devicePixelRatio, 1.5),
   }));
-  assertEqual(state.cap, 32, "maxPixelRadius");
+  assert(state.cap >= state.diagonal, "近距离高斯覆盖范围不应小于屏幕对角线");
   assertEqual(state.minAlpha, 0.005, "minAlpha");
 }, DEMO_ID ? null : "没有带场景的项目");
 
