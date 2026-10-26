@@ -67,6 +67,20 @@ class GeometryTests(unittest.TestCase):
         self.assertEqual(result['verdict'], 'pass')
         self.assertEqual(result['models'][0]['geometryComponentSizes'], [4])
 
+    def test_attempt_manifest_prefix_uses_image_relative_names(self):
+        scratch = tempfile.TemporaryDirectory()
+        self.addCleanup(scratch.cleanup)
+        root = Path(scratch.name)
+        make_model(root/'sparse/0', [[1,2]], 2)
+        (root/'manifest.json').write_text(json.dumps({'records':[
+            {'work_image':f'inputs/images/camera-01/image-{i}.jpg','excluded':None} for i in (1,2)
+        ]}), encoding='utf8')
+        subprocess.run([sys.executable,str(HERE/'gate_model.py'),'--model-root',str(root/'sparse'),
+                        '--database',str(root/'absent.db'),'--manifest',str(root/'manifest.json'),
+                        '--out',str(root/'summary'),'--min-points','1'],check=True,capture_output=True)
+        result=json.loads((root/'summary/gate.json').read_text(encoding='utf8'))
+        self.assertEqual(result['models'][0]['unregistered'],[])
+
     def test_one_file_with_two_disconnected_parts_fails(self):
         result = self.run_gate([[1, 2], [3, 4]], 4)
         self.assertEqual(result['verdict'], 'split')
@@ -82,6 +96,20 @@ class GeometryTests(unittest.TestCase):
     def test_zero_points_cannot_pass_even_with_zero_minimum(self):
         result = self.run_gate([], 4)
         self.assertNotEqual(result['verdict'], 'pass')
+
+    def test_corrupt_existing_database_is_a_tool_failure(self):
+        with tempfile.TemporaryDirectory() as scratch:
+            root=Path(scratch)
+            make_model(root/'sparse/0',[[1,2]],2)
+            (root/'broken.db').write_bytes(b'not a sqlite database')
+            (root/'manifest.json').write_text(json.dumps({'records':[
+                {'work_image':f'images/camera-01/image-{i}.jpg','excluded':None} for i in (1,2)
+            ]}),encoding='utf8')
+            result=subprocess.run([sys.executable,str(HERE/'gate_model.py'),'--model-root',str(root/'sparse'),
+                        '--database',str(root/'broken.db'),'--manifest',str(root/'manifest.json'),
+                        '--out',str(root/'summary'),'--min-points','1'],capture_output=True)
+            self.assertNotEqual(result.returncode,0)
+            self.assertFalse((root/'summary/gate.json').exists())
 
 
 if __name__ == '__main__':

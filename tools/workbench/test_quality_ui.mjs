@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { existsSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {createWorkbenchServer} from './server.mjs';
+const server=createWorkbenchServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));
 const require = createRequire(import.meta.url);
 const cache = resolve(process.env.LOCALAPPDATA, 'npm-cache/_npx');
 const moduleDir = readdirSync(cache).map(name => resolve(cache, name, 'node_modules/playwright')).find(existsSync);
@@ -31,11 +33,11 @@ try {
       geometryValidationVersion: 1, models: [{ name: '0', registered: 3, registration_ratio: 1, points: 6000,
         geometryComponents: [{ index: 0, registered: 3, images: ['a.jpg','b.jpg','c.jpg'] }] }] } } });
   });
-  await page.goto(process.env.WORKBENCH_URL ?? 'http://127.0.0.1:8123');
+  await page.goto(`http://127.0.0.1:${server.address().port}`);
   await page.waitForFunction(() => window.__qualityES?.listeners?.state);
   while (!summaries) await new Promise(resolve => setTimeout(resolve, 20));
   await page.evaluate(project => window.__qualityES.listeners.state({ data: JSON.stringify(project) }), project);
   await page.waitForFunction(() => document.querySelector('#evidence')?.textContent.includes('最终几何分量'), null, { timeout: 3000 });
   assert.ok(summaries >= 2);
   console.log('PASS: partial state after component gate refreshes evidence');
-} finally { await browser.close(); }
+} finally { await browser.close();await new Promise(r=>server.close(r)); }

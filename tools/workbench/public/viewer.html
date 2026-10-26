@@ -140,7 +140,7 @@ const home = {
 // 所以初始观感仍是「站在原地环视」，拉远后它又近似场景中心，可以环看整个模型。
 let yaw = home.yaw;
 let pitch = home.pitch;
-let distance = 2;        // 相机到 target 的距离（米）
+let distance = 2;        // 相机到 target 的距离（模型单位）
 let sceneRadius = 4;     // 场景尺度：优先 ?radius=（相机轨迹半径），其次高斯点包围盒
 let maxDistance = 20;    // 拉远上限；保证一定能拉到看见整体
 const target = new THREE.Vector3();
@@ -153,12 +153,12 @@ const yawOnly = new THREE.Quaternion();
 const up = new THREE.Vector3(0, 1, 0);
 const keys = new Set();
 const canvas = renderer.domElement;
-const PIVOT_DISTANCE = 2;          // 初始支点距离：视线前方 2 米
+const PIVOT_DISTANCE = 2;          // 初始支点距离：视线前方 2 个模型单位
 const ORBIT_SENSITIVITY = 0.004;   // 弧度 / 像素
 const PITCH_LIMIT = 1.5;           // 上下限约 86°，防止万向节翻转；左右不夹紧，可转满 360°
 const ZOOM_STEP = 1.15;            // 每格滚轮缩放 15%
 const MIN_DISTANCE = 0.1;
-const MOVE_SPEED = 1.6;            // 米 / 秒，固定速度
+const MOVE_SPEED = 1.6;            // 模型单位 / 秒，固定速度
 
 /** 相机朝向，与 Euler(pitch, yaw, 0) 的局部 -Z 一致。 */
 function forwardVector() {

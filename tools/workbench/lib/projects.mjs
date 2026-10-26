@@ -1,15 +1,17 @@
 // Project store: one directory per project under <repo>/projects.
 import { spawn } from "node:child_process";
 import {
-  cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,
+  cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,realpathSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { resolve } from "node:path";
+import { resolve,sep } from "node:path";
 import { PROJECTS_DIR, WORKBENCH } from "./paths.mjs";
 import {
   CAMERA_MODELS, FEATURE_PRESETS, STEP_ORDER, TRAINING_PRESETS, dirs, geometrySignature, globalProgress, readGate, sparseModels,
 } from "./pipeline.mjs";
 import { scenePose } from "./pose.mjs";
+import { readAssistance, updateAssistance } from './assistance.mjs';
+import {qualityFor} from './quality.mjs';
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const IMAGE_SUFFIXES = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"]);
@@ -73,30 +75,22 @@ export function reconcile() {
   const reconciled = [];
   for (const entry of readdirSync(PROJECTS_DIR, { withFileTypes: true })) {
     if (!entry.isDirectory() || !isValidId(entry.name)) continue;
-    let project;
-    try {
-      project = read(entry.name);
-    } catch {
-      continue;
-    }
-    const stuckSteps = (project.steps ?? []).filter((step) => step.status === "running");
-    const stuck = ["running", "aborting"].includes(project.state) || stuckSteps.length > 0;
-    if (!stuck) continue;
-    for (const step of stuckSteps) {
-      step.status = "aborted";
-      step.endedAt = step.endedAt ?? new Date().toISOString();
-    }
-    project.state = "aborted";
-    project.currentStep = null;
-    project.lastError = "工作台服务曾中断，该作业已停止；可点「继续重建」从中断处恢复。";
-    try {
-      write(project);
-      reconciled.push(project.id);
-    } catch {
-      // A project we cannot rewrite must not stop the boot sequence.
-    }
+    if(reconcileProject(entry.name))reconciled.push(entry.name);
   }
   return reconciled;
+}
+export function reconcileProject(id){
+  let project;try{project=read(id);}catch{return false;}
+  const stuckSteps=(project.steps??[]).filter(step=>step.status==='running');
+  if(!['running','aborting'].includes(project.state)&&!stuckSteps.length)return false;
+  for(const step of stuckSteps){step.status='aborted';step.endedAt??=new Date().toISOString();}
+  project.state='aborted';project.currentStep=null;
+  project.lastError='工作台服务曾中断，该作业已停止；可点「继续重建」从中断处恢复。';
+  try{
+    write(project);
+    if(readAssistance(project)?.state==='solving')updateAssistance(project,current=>({...current,state:'ready',recoveryNote:'服务曾中断。回答已保存；继续前将重新检查输入。'}));
+    return true;
+  }catch{return false;}
 }
 
 function markPendingFrom(project, stepId) {
@@ -117,6 +111,7 @@ const PATCHABLE = ["useGpu", "cameraModel", "featurePreset", "trainingPreset", "
 
 export function update(id, patch) {
   const project = read(id);
+  const geometrySettings=JSON.stringify([project.cameraModel,project.featurePreset??'standard',project.mapper??'incremental',project.selectedModel??null]);
   const running = ["running", "aborting"].includes(project.state);
   const applied = [];
   const blocked = [];
@@ -193,7 +188,12 @@ export function update(id, patch) {
       { code: 409 },
     );
   }
-  return write(project);
+  const saved=write(project);
+  if(geometrySettings!==JSON.stringify([project.cameraModel,project.featurePreset??'standard',project.mapper??'incremental',project.selectedModel??null])&&readAssistance(project)){
+    updateAssistance(project,current=>({...current,state:'stale',verifiedAgainst:null,
+      missing:[{code:'reconstruction_settings_changed',message:'重建设置已改变。请先重跑相应前置步骤，再复查已保存的回答和标记。'}]}));
+  }
+  return saved;
 }
 
 export function list() {
@@ -222,6 +222,8 @@ export function summarise(project) {
     useGpu: project.useGpu,
     cameraModel: project.cameraModel,
     selectedModel: project.selectedModel ?? null,
+    activeAttemptId:project.activeAttemptId??null,pendingAttemptId:project.pendingAttemptId??null,
+    quality:qualityFor(project),
     mapper: project.mapper ?? "incremental",
     featurePreset: project.featurePreset ?? "standard",
     componentSource: project.componentSource ?? null,
@@ -308,7 +310,8 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
 
 /** Snapshot an inspected component into a new project; the source stays intact. */
 export function createComponent(id, { model: modelName, component: componentIndex }) {
-  const source = read(id);
+  const stored=read(id);
+  const source={...stored,activeAttemptId:stored.pendingAttemptId??stored.activeAttemptId??null};
   if (["running", "aborting"].includes(source.state)) throw Object.assign(new Error("源项目正在运行"), { code: 409 });
   const gate = readGate(source);
   if (gate?.geometryValidationVersion !== 1 || gate.verdict === "unverified") {
@@ -324,9 +327,11 @@ export function createComponent(id, { model: modelName, component: componentInde
   if (geometrySignature(input) !== model.geometrySignature) {
     throw Object.assign(new Error("几何报告已过期，请重新运行几何检查"), { code: 409 });
   }
-  const manifest = JSON.parse(readFileSync(resolve(dirs(source).root, "manifest.json"), "utf8"));
+  const manifest = JSON.parse(readFileSync(dirs(source).manifest, "utf8"));
   const names = new Set(component.images);
-  const records = manifest.records.filter(record => !record.excluded && names.has(record.work_image?.replace(/^images\//, "")));
+  const workName=name=>name?.replace(/^(?:inputs\/)?images\//,'');
+  const records = manifest.records.filter(record => !record.excluded && names.has(workName(record.work_image)))
+    .map(record=>({...record,work_image:`images/${workName(record.work_image)}`}));
   if (records.length !== names.size) throw Object.assign(new Error("照片清单与几何分量不一致"), { code: 409 });
   const newId = `${slugify(source.name).slice(0, 25)}-region-${componentIndex + 1}-${randomBytes(3).toString("hex")}`;
   const project = structuredClone(source);
@@ -340,6 +345,10 @@ export function createComponent(id, { model: modelName, component: componentInde
   project.sourceImageCount = records.length;
   project.componentSource = { projectId: id, model: modelName, index: componentIndex, images: component.images,
     layoutVerified: false };
+  delete project.activeAttemptId;
+  delete project.pendingAttemptId;
+  delete project.trainingResume;
+  delete project.root;
   delete project.childPid;
   const d = dirs(project);
   mkdirSync(d.root);
@@ -386,14 +395,16 @@ export function remove(id) {
 
 /** Every exported checkpoint on disk, newest first. */
 export function trainExports(project) {
-  const folder = dirs(project).train;
+  const d=dirs(project),folder = d.train;
   if (!existsSync(folder)) return [];
   return readdirSync(folder)
     .map((file) => /^export_(\d+)\.ply$/.exec(file))
     .filter(Boolean)
     .map((match) => {
       const path = resolve(folder, match[0]);
-      return { step: Number(match[1]), name: match[0], path, size: statSync(path).size };
+      if(!realpathSync(path).startsWith(realpathSync(d.workspace)+sep))throw Object.assign(new Error('场景文件路径越界'),{code:400});
+      return { step: Number(match[1]), name: match[0], path, size: statSync(path).size,
+        attemptId: project.activeAttemptId??null };
     })
     .sort((a, b) => b.step - a.step);
 }

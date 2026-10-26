@@ -2,12 +2,17 @@
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import {
-  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, rmSync, statSync, writeFileSync,
+  appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readFileSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
-import { resolve } from "node:path";
+import { resolve, sep } from "node:path";
 import { PY_DIR, TOOLS } from "./paths.mjs";
 import * as pipeline from "./pipeline.mjs";
 import * as projects from "./projects.mjs";
+import { atomicJson, newRecord, readAssistance, updateAssistance, inputError, preserveQuestions, rebaseRecordGeometry } from './assistance.mjs';
+import { diagnoseAssistance } from './assistance-diagnosis.mjs';
+import { readAttempt, writeAttempt, adoptAttempt, sameInputs } from './attempts.mjs';
+import { getContext, prepareAutomaticAttempt, prepareAssistedAttempt, assistanceSource } from './assistance-service.mjs';
+import {qualityFor,deriveQuality} from './quality.mjs';
 
 const active = new Map();
 const channels = new Map();
@@ -98,10 +103,10 @@ function pushLog(job, stepId, text, logPath) {
 function applyProgress(job, step, project, text) {
   if (!step.progress) return;
   for (const line of text.split(/\r?\n/)) {
-    const value = step.progress(line, project);
+    const value = step.progress(line, job.scopeProject??project);
     if (value == null) continue;
     const normalised = step.progressIsCount
-      ? Math.min(value / Math.max(step.progressTotal?.(project) ?? 1, 1), 1)
+      ? Math.min(value / Math.max(step.progressTotal?.(job.scopeProject??project) ?? 1, 1), 1)
       : Math.min(Math.max(value, 0), 1);
     setProgress(job, project, step, normalised);
   }
@@ -198,7 +203,7 @@ function processInfo(pid) {
 }
 
 const OUR_TOOLS = new Set(["colmap.exe", "brush_app.exe"]);
-const OWNED_SCRIPTS = new Set(["sparse_reconstruct.py", "extract_component.py", "prepare_project.py", "gate_model.py"]
+const OWNED_SCRIPTS = new Set(["sparse_reconstruct.py", "extract_component.py", "prepare_project.py", "gate_model.py", "assistance_inputs.py", "assisted_reconstruct.py"]
   .map(name => resolve(PY_DIR, name).toLowerCase()));
 
 export function isOwnedProcess(project, info) {
@@ -271,6 +276,10 @@ function halt(job, project, index, message) {
   project.state = "failed";
   project.lastError = message;
   project.currentStep = null;
+  if(job.attemptId){
+    const attempt=readAttempt(project,job.attemptId);attempt.status='failed';attempt.failure={message};writeAttempt(project,attempt);
+  }
+  if(job.assistanceRecord)updateAssistance(project,current=>({...current,state:current.revision===job.assistanceRecord.revision?'failed':current.state}));
   persist(project);
   emitState(job.projectId, project);
 }
@@ -292,10 +301,30 @@ function settle(job, project) {
   emitState(job.projectId, project);
 }
 
+function pauseForInput(job,project,index,missing) {
+  const record=project.steps[index];record.status='needs_input';record.endedAt=new Date().toISOString();record.error=null;
+  record.note=missing.map(m=>m.message).filter(Boolean).join(' ');
+  for(let i=index+1;i<project.steps.length;i++)project.steps[i].status='blocked';
+  project.state='needs_input';project.currentStep=record.id;project.lastError=null;
+  persist(project);emitState(project.id,project);
+}
+async function checkAssistance(job,project,index,gate,execute) {
+  const context=await (job.runtime.getContext??getContext)(job.scopeProject,{fresh:true,execute});
+  const previous=readAssistance(project);
+  const diagnosis=diagnoseAssistance({gate,catalog:context.catalog,record:previous,
+    manualRequest:previous?.state!=='verified'&&previous?.reasons?.some(r=>r.code==='position_review')});
+  if(!diagnosis.required)return {context,diagnosis};
+  const photos=context.catalog.map(p=>({...p,unregistered:diagnosis.unregistered.includes(p.photoId),regionIds:diagnosis.regions.filter(r=>r.photoIds.includes(p.photoId)).map(r=>r.id)}));
+  updateAssistance(project,current=>({...current??newRecord({catalog:photos,inputs:context.inputs}),state:'needs_input',
+    inputs:context.inputs,photos,regions:diagnosis.regions,questions:preserveQuestions(current,diagnosis.questions,photos),reasons:diagnosis.reasons,missing:diagnosis.missing,
+    sourceAttemptId:job.attemptId??project.activeAttemptId??null,verifiedAgainst:null}));
+  if(job.attemptId){const attempt=readAttempt(project,job.attemptId);attempt.status='needs_input';attempt.result={gate};writeAttempt(project,attempt);}
+  pauseForInput(job,project,index,diagnosis.missing);
+  return null;
+}
+
 async function run(job, project, options) {
   const steps = pipeline.buildSteps();
-  const d = pipeline.dirs(project);
-  mkdirSync(d.logs, { recursive: true });
 
   let startIndex;
   if (options.fromStep) {
@@ -319,12 +348,41 @@ async function run(job, project, options) {
   persist(project);
   emitState(job.projectId, project);
 
+  const onAttempt=attempt=>{job.attemptId=attempt.id;project.pendingAttemptId=attempt.id;persist(project);};
+  const execute=async(cmd,args)=>{
+    const folder=pipeline.dirs(project,{attemptId:job.attemptId??project.activeAttemptId??null}).logs;
+    mkdirSync(folder,{recursive:true});const log=resolve(folder,'sparse.log');
+    const result=await spawnStep(job,{id:'sparse',name:'输入验证'},project,cmd,args,log);
+    if(job.aborted)throw inputError('作业已取消',409);
+    if(result.code!==0||result.spawnError)throw inputError('输入快照或指纹检查失败。请查看稀疏重建日志。',500);
+  };
+  if(job.assistanceRecord){
+    job.prepared=await (job.runtime.prepareAssistedAttempt??prepareAssistedAttempt)(project,job.assistanceRecord,{execute,onAttempt});
+    if(!sameInputs(job.prepared.context.inputs,job.assistanceRecord.inputs))throw Object.assign(inputError('辅助输入已改变。请重新检查回答和标记。',409),{staleAssistance:true});
+    updateAssistance(project,current=>{
+      if(current.revision!==job.assistanceRecord.revision)throw Object.assign(inputError('准备求解期间回答已更新，请使用新版本继续。',409),{staleAssistance:true});
+      return {...current,state:'solving',lastAttemptId:job.attemptId};
+    });
+    job.scopeProject=job.prepared.project;
+  }else if(!(steps[startIndex].id==='train'&&project.trainingResume)){
+    const prepared=await (job.runtime.prepareAutomaticAttempt??prepareAutomaticAttempt)(project,steps[startIndex].id,{execute,onAttempt});
+    job.scopeProject=prepared.project;
+    if(prepared.attempt.status==='verified'){
+      Object.assign(project,adoptAttempt(project,prepared.attempt,{currentRevision:readAssistance(project)?.revision??0,currentFingerprint:prepared.attempt.inputFingerprint}));
+      delete project.trainingResume;
+      job.scopeProject={...project};
+    }
+  }else job.scopeProject={...project};
+  if(job.aborted)throw inputError('作业已取消',409);
+  const d=pipeline.dirs(job.scopeProject);
+  mkdirSync(d.logs,{recursive:true});
+
   const poller = setInterval(() => {
     const index = project.steps.findIndex((step) => step.status === "running");
     if (index < 0) return;
     const step = steps[index];
     if (step.id !== "train") return;
-    const latest = pipeline.latestExportStep(project);
+    const latest = pipeline.latestExportStep(job.scopeProject);
     if (!latest) return;
     const preset = pipeline.TRAINING_PRESETS[project.trainingPreset] ?? pipeline.TRAINING_PRESETS.standard;
     setProgress(job, project, step, Math.min(latest / preset.totalSteps, 1));
@@ -339,7 +397,7 @@ async function run(job, project, options) {
     const record = project.steps[index];
     const started = record.startedAt ? new Date(record.startedAt).getTime() : Date.now();
     const elapsed = formatDuration(Math.max(1000, Date.now() - started));
-    const scene = projects.latestExport(project);
+    const scene = projects.latestExport(job.scopeProject);
     const detail = step.id === "train" && scene
       ? `；最近导出 ${scene.name}（${(scene.size / 1024 / 1024).toFixed(1)} MB）`
       : "";
@@ -354,13 +412,15 @@ async function run(job, project, options) {
       const step = steps[i];
       const record = project.steps[i];
       if (step.id === "train") {
-        try { pipeline.requireTrainingDataset(project); }
+        try { pipeline.requireTrainingDataset(job.scopeProject); }
         catch (error) { halt(job, project, i, error.message); return; }
       }
 
       if (step.clean) {
-        for (const target of step.clean(d, project)) {
+        for (const target of step.clean(d, job.scopeProject)) {
           try {
+            const absolute=resolve(target),workspace=resolve(d.workspace);
+            if(absolute===workspace||!absolute.startsWith(workspace+sep))throw inputError('清理目标越过当前尝试目录',409);
             rmSync(target, { recursive: true, force: true });
           } catch (error) {
             halt(job, project, i, `清理「${step.name}」的旧产物失败：${target}（${error.message}）`);
@@ -381,6 +441,7 @@ async function run(job, project, options) {
       }
 
       Object.assign(record, { status: "running", progress: 0, startedAt: new Date().toISOString() });
+      delete record.note;
       delete record.endedAt;
       project.currentStep = step.id;
       persist(project);
@@ -393,7 +454,9 @@ async function run(job, project, options) {
       job.logTail = [];
       job.logTailSize = 0;
 
-      const { cmd, args } = step.command(project);
+      const { cmd, args } = job.prepared&&step.id==='sparse'
+        ? (job.runtime.assistanceCommand?.(job.prepared)??{cmd:TOOLS.python,args:[resolve(PY_DIR,'assisted_reconstruct.py'),'--request',job.prepared.requestPath,'--result',job.prepared.resultPath]})
+        : (job.runtime.commandForStep?.(step.id,job.scopeProject)??step.command(job.scopeProject));
       pushLog(job, step.id, `$ ${cmd} ${args.join(" ")}\n`, logPath);
 
       const result = await spawnStep(job, step, project, cmd, args, logPath);
@@ -421,27 +484,74 @@ async function run(job, project, options) {
         return;
       }
 
+      if(job.prepared&&step.id==='sparse'&&existsSync(job.prepared.resultPath)){
+        const solved=JSON.parse(readFileSync(job.prepared.resultPath,'utf8'));job.assistanceResult=solved;
+        if(solved.outcome==='verified'&&readAssistance(project).revision!==job.assistanceRecord.revision){
+          const attempt=readAttempt(project,job.attemptId);attempt.status='stale';attempt.result=solved;writeAttempt(project,attempt);
+          pauseForInput(job,project,i,[{code:'stale_result',message:'求解期间回答已更新。旧模型已保留，请使用最新信息继续。'}]);return;
+        }
+        if(solved.outcome==='needs_input'){
+          updateAssistance(project,current=>({...current,state:current.revision===job.assistanceRecord.revision?'needs_input':current.state,missing:solved.missing,lastAttemptId:job.attemptId}));
+          const attempt=readAttempt(project,job.attemptId);attempt.status='needs_input';attempt.result=solved;writeAttempt(project,attempt);
+          pauseForInput(job,project,i,solved.missing);return;
+        }
+        if(solved.outcome==='failed'){
+          halt(job,project,i,solved.error?.message??'辅助求解工具失败。请查看日志。');return;
+        }
+      }
       if (result.code !== 0) {
         halt(job, project, i, `「${step.name}」退出码 ${result.code}${result.signal ? `（信号 ${result.signal}）` : ""}`);
         return;
       }
 
       if (step.gate) {
-        const gate = pipeline.readGate(project);
+        const gate = pipeline.readGate(job.scopeProject);
         if (!gate) {
           halt(job, project, i, "几何门禁未产出 gate.json");
           return;
         }
-        project.selectedModel = gate.selectedModel ?? null;
-        persist(project);
-        if (gate.verdict !== "pass") {
-          halt(job, project, i, gate.message ?? `几何门禁未通过（${gate.verdict}）`);
-          return;
+        job.scopeProject.selectedModel=gate.selectedModel??null;
+        let context;
+        if(job.assistanceRecord){
+          const current=readAssistance(project);
+          const sourceContext=await (job.runtime.getContext??getContext)(assistanceSource(project,job.assistanceRecord),{fresh:true,execute});
+          if(current.revision!==job.assistanceRecord.revision||!sameInputs(sourceContext.inputs,job.assistanceRecord.inputs)){
+            pauseForInput(job,project,i,[{code:'stale_result',message:'求解期间回答或照片已更新。旧模型已保留，请使用最新信息继续。'}]);return;
+          }
+          context=await (job.runtime.getContext??getContext)(job.scopeProject,{fresh:true,execute});
+          if(gate.verdict!=='pass'||!job.assistanceResult?.bridges?.accepted){pauseForInput(job,project,i,[{message:gate.message??'最终共享点未通过验证。'}]);return;}
+          // Re-read after all asynchronous hashes, before adopting any result.
+          if(readAssistance(project).revision!==job.assistanceRecord.revision){pauseForInput(job,project,i,[{message:'回答已更新，请按新版本继续。'}]);return;}
+          const latest=readAssistance(project),diagnosis=diagnoseAssistance({gate,catalog:context.catalog,record:latest,manualRequest:false});
+          if(diagnosis.required){
+            updateAssistance(project,current=>({...current,...rebaseRecordGeometry(current,diagnosis,context.catalog),state:'needs_input',inputs:context.inputs,
+              reasons:diagnosis.reasons,missing:diagnosis.missing,sourceAttemptId:job.attemptId,verifiedAgainst:null}));
+            const pending=readAttempt(project,job.attemptId);pending.status='needs_input';pending.result={...job.assistanceResult,gate};writeAttempt(project,pending);
+            pauseForInput(job,project,i,diagnosis.missing);return;
+          }
+        }else{
+          const checked=await checkAssistance(job,project,i,gate,execute);if(!checked)return;context=checked.context;
+          if(job.runtime.coverageRecord&&(readAssistance(project).revision!==job.runtime.coverageRecord.revision||!sameInputs(context.inputs,job.runtime.coverageRecord.inputs))){
+            pauseForInput(job,project,i,[{message:'覆盖检查的回答或输入已改变，请重新确认。'}]);return;
+          }
         }
+        const attempt=readAttempt(project,job.attemptId);
+        if(!job.assistanceRecord)attempt.inputFingerprint=context.inputs;
+        const inherited=attempt.result?.geometrySignature===gate.models.find(m=>m.name===gate.selectedModel)?.geometrySignature?attempt.result:null;
+        attempt.status='verified';attempt.result={selectedModel:gate.selectedModel,gate,geometrySignature:gate.models.find(m=>m.name===gate.selectedModel)?.geometrySignature,
+          bridges:job.assistanceResult?.bridges??inherited?.bridges??null,scale:job.assistanceResult?.scale??inherited?.scale??null,localRepair:job.assistanceResult?.localRepair??inherited?.localRepair??null};writeAttempt(project,attempt);
+        Object.assign(project,adoptAttempt(project,attempt,{currentRevision:readAssistance(project)?.revision??0,currentFingerprint:job.assistanceRecord?job.prepared.attempt.inputFingerprint:context.inputs}));
+        delete project.trainingResume;
+        job.scopeProject={...project};
+        record.note=gate.message;
+        const outputDiagnosis=diagnoseAssistance({gate,catalog:context.catalog,record:readAssistance(project)});
+        if(readAssistance(project))updateAssistance(project,current=>({...current,...rebaseRecordGeometry(current,outputDiagnosis,context.catalog),state:'verified',inputs:context.inputs,sourceAttemptId:attempt.id,
+          verifiedAgainst:{attemptId:attempt.id,geometrySignature:attempt.result.geometrySignature,sourceInputs:attempt.inputFingerprint,scale:job.assistanceResult?.scale?.scale??'unmeasured'},reasons:[],missing:[]}));
+        qualityFor(project,{fresh:true});
       }
 
       if (step.verify) {
-        const check = step.verify(project);
+        const check = step.verify(job.scopeProject);
         if (!check.ok) {
           halt(job, project, i, `「${step.name}」校验失败：${check.message}`);
           return;
@@ -458,10 +568,12 @@ async function run(job, project, options) {
   } finally {
     clearInterval(poller);
     clearInterval(heartbeat);
+    if(job.aborted&&job.assistanceRecord)updateAssistance(project,current=>({...current,state:current.revision===job.assistanceRecord.revision?'ready':current.state}));
+    if(job.aborted&&job.attemptId){const attempt=readAttempt(project,job.attemptId);attempt.status='aborted';writeAttempt(project,attempt);}
   }
 }
 
-export function start(projectId, options = {}) {
+export function start(projectId, options = {}, runtime = {}) {
   if (active.size) {
     throw Object.assign(new Error("已有作业在运行，请先等待完成或中止"), { code: 409 });
   }
@@ -474,10 +586,15 @@ export function start(projectId, options = {}) {
     throw Object.assign(new Error("结束步骤早于开始步骤，请选择有效运行范围"), { code: 400 });
   }
   if (options.fromStep && startIndex < 0) throw Object.assign(new Error("未知步骤"), { code: 400 });
+  const assistance=readAssistance(project);
+  if(startIndex>=order.indexOf('undistort')&&assistance&&assistance.state!=='verified')throw inputError('辅助信息尚未验证。请先在辅助重建中继续。',409);
   if (project.componentSource && startIndex >= 0 && startIndex < order.indexOf("sparse")) {
     throw Object.assign(new Error("独立区域项目复用已定位的数据。请从稀疏重建或几何检查继续。"), { code: 409 });
   }
-  if (startIndex >= order.indexOf("undistort")) pipeline.requireValidatedModel(project);
+  if (startIndex >= order.indexOf("undistort")) {
+    pipeline.requireValidatedModel(project);
+    if(deriveQuality(project,{gate:pipeline.readGate(project),record:assistance}).coverage!=='reviewed')throw inputError('目标区域覆盖尚未确认。请先重试几何检查，确认未定位照片所属区域。',409);
+  }
   if (startIndex === order.indexOf("train")) pipeline.requireTrainingDataset(project);
   if (options.trainingPreset && pipeline.TRAINING_PRESETS[options.trainingPreset]) {
     project.trainingPreset = options.trainingPreset;
@@ -487,21 +604,27 @@ export function start(projectId, options = {}) {
     id: `${projectId}-${Date.now()}`,
     projectId,
     project,
+    runtime,
+    assistanceRecord:runtime.assistanceRecord??null,
     child: null,
     aborted: false,
     logTail: [],
     logTailSize: 0,
   };
   active.set(projectId, job);
-  run(job, project, options)
+  job.done=run(job, project, options)
     .catch((error) => {
       // This handler must never throw: a secondary failure here would surface as
       // an unhandled rejection and take the whole server down.
       try {
         const latest = projects.read(projectId);
-        latest.state = "failed";
-        latest.lastError = error.message;
-        latest.currentStep = null;
+        const stale=error.staleAssistance===true;
+        latest.state = job.aborted ? 'aborted' : stale?'needs_input':"failed";
+        latest.lastError = stale?null:error.message;
+        latest.currentStep = stale?'sparse':null;
+        if(stale){const i=latest.steps.findIndex(s=>s.id==='sparse');latest.steps[i].status='needs_input';latest.steps[i].note=error.message;for(let j=i+1;j<latest.steps.length;j++)latest.steps[j].status='blocked';}
+        if(job.attemptId){const attempt=readAttempt(latest,job.attemptId);attempt.status=job.aborted?'aborted':stale?'stale':'failed';attempt.failure={message:error.message};writeAttempt(latest,attempt);}
+        if(job.assistanceRecord)updateAssistance(latest,current=>({...current,state:current.revision===job.assistanceRecord.revision?(job.aborted?'ready':stale?'stale':'failed'):current.state}));
         persist(latest);
         emitState(projectId, latest);
       } catch (secondary) {
@@ -512,13 +635,16 @@ export function start(projectId, options = {}) {
   return job;
 }
 
-/**
- * Rerunning the train step wipes its directory first, which used to silently
- * delete an already exported scene. Callers must pass allowTrainClean to proceed.
- *
- * Two ways to reach train: resuming a run whose next step is train, or an explicit
- * `fromStep` at or before train (the "retry this step" button).
- */
+export function startAssistance(projectId,{expectedRevision,untilStep}={},runtime={}) {
+  const project=projects.read(projectId),record=readAssistance(project);
+  if(!record||record.revision!==expectedRevision)throw inputError('辅助回答版本已改变。请读取新版本。',409,{revision:record?.revision??0});
+  if(record.state!=='ready')throw inputError('辅助信息尚不足以启动求解。请查看缺少信息。',409,{missing:record.missing});
+  if(project.steps.slice(0,3).some(step=>step.status!=='success'))throw inputError('照片、特征或匹配需要重跑。请先完成这些步骤，再使用辅助信息继续。',409);
+  if(record.reasons?.length&&record.reasons.every(r=>r.code==='coverage_unknown'))return start(projectId,{fromStep:'gate',...(untilStep?{untilStep}:{})},{...runtime,coverageRecord:structuredClone(record)});
+  return start(projectId,{fromStep:'sparse',...(untilStep?{untilStep}:{})},{...runtime,assistanceRecord:structuredClone(record)});
+}
+
+/** Retained API: fresh runs use new attempts; checkpoint resume stays validated. */
 export function trainCleanWarning(project, options = {}) {
   const order = pipeline.buildSteps().map((step) => step.id);
   const trainIndex = order.indexOf("train");
@@ -537,13 +663,7 @@ export function trainCleanWarning(project, options = {}) {
     return null;
   }
 
-  const exports = projects.trainExports(project);
-  if (!exports.length) return null;
-  return {
-    code: "train_clean_confirmation_required",
-    message: `重新训练会先清空项目的 train/ 目录，删除以下 ${exports.length} 个已导出的场景文件。`,
-    files: exports.map((item) => ({ name: item.name, step: item.step, size: item.size })),
-  };
+  return null;
 }
 
 export async function abort(projectId) {
@@ -595,7 +715,7 @@ function readTail(path, maxBytes = LOG_TAIL_BYTES) {
 export function readStepLog(projectId, stepId, tailBytes = 65536) {
   const project = projects.read(projectId);
   const id = stepId ?? lastActiveStepId(project);
-  const path = resolve(pipeline.dirs(project).logs, `${id}.log`);
+  const path = resolve(pipeline.dirs(project,{attemptId:project.pendingAttemptId??project.activeAttemptId??null}).logs, `${id}.log`);
   if (!existsSync(path)) throw Object.assign(new Error("该步骤还没有日志"), { code: 404 });
   return { step: id, text: readTail(path, tailBytes) };
 }

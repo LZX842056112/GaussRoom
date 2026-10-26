@@ -30,6 +30,14 @@ def reconstruct(colmap, database, image_path, output_path, mapper, threads=12, s
             print('[workbench] 相机校准失败，未启动全局式重建。请检查上方校准日志。', file=sys.stderr, flush=True)
             raise
         database = calibrated
+    else:
+        working = database.with_name('database-incremental.db')
+        if working.resolve() == database.resolve():
+            raise ValueError('增量式工作副本不能覆盖源匹配数据库')
+        with closing(sqlite3.connect(database.resolve().as_uri()+'?mode=ro', uri=True)) as source:
+            with closing(sqlite3.connect(working)) as target:
+                source.backup(target)
+        database = working
     stage = '2/2' if mapper == 'global' else '1/1'
     print(f'[workbench] 子阶段 {stage}：运行{"全局式" if mapper == "global" else "增量式"}重建', flush=True)
     prefix = 'GlobalMapper' if mapper == 'global' else 'Mapper'

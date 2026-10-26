@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { PY_DIR, PROJECTS_DIR, TOOLS } from "./paths.mjs";
+import { artifactDirs } from './artifact-paths.mjs';
 
 export const STEP_ORDER = [
   { id: "prepare", name: "照片预处理" },
@@ -47,32 +48,20 @@ export const TRAINING_PRESETS = {
   full: { label: "完整", totalSteps: 30000, maxSplats: 1000000, shDegree: 2, exportEvery: 5000, eta: "约 60 分钟", ply: "约 150 MB" },
 };
 
-export function dirs(project) {
-  const root = resolve(PROJECTS_DIR, project.id);
-  return {
-    root,
-    images: resolve(root, "images"),
-    sfm: resolve(root, "sfm"),
-    sparse: resolve(root, "sfm", "sparse"),
-    summary: resolve(root, "summary"),
-    undistorted: resolve(root, "undistorted"),
-    train: resolve(root, "train"),
-    logs: resolve(root, "logs"),
-  };
-}
+export function dirs(project,options={}) { return artifactDirs(project,options); }
 
 export function manifestSummary(project) {
   try {
-    const manifest = JSON.parse(readFileSync(resolve(dirs(project).root, "manifest.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync(dirs(project).manifest, "utf8"));
     return { retained: manifest.retained_count, groups: manifest.camera_groups };
   } catch {
     return { retained: 0, groups: {} };
   }
 }
 
-export function readGate(project) {
+export function readGate(project,options={}) {
   try {
-    const gate = JSON.parse(readFileSync(resolve(dirs(project).summary, "gate.json"), "utf8"));
+    const gate = JSON.parse(readFileSync(resolve(dirs(project,options).summary, "gate.json"), "utf8"));
     if (gate.geometryValidationVersion !== 1) {
       return { ...gate, previousVerdict: gate.verdict, verdict: "unverified", geometryConnected: false,
         message: "几何连接未验证。请重新运行几何检查，再决定是否训练。" };
@@ -83,10 +72,10 @@ export function readGate(project) {
   }
 }
 
-export function matchingDatabase(project) {
-  const calibrated = resolve(dirs(project).sfm, "database-global.db");
+export function matchingDatabase(project,options={}) {
+  const calibrated = resolve(dirs(project,options).sfm, "database-global.db");
   return project.mapper === "global" && existsSync(calibrated)
-    ? calibrated : resolve(dirs(project).sfm, "database.db");
+    ? calibrated : resolve(dirs(project,options).sfm, "database.db");
 }
 
 export function geometrySignature(folder) {
@@ -95,15 +84,17 @@ export function geometrySignature(folder) {
     if (name === "cameras.bin" && !existsSync(resolve(folder, name))) continue;
     hash.update(readFileSync(resolve(folder, name)));
   }
+  for(const name of ['frames.bin','rigs.bin'])if(existsSync(resolve(folder,name)))hash.update(name).update('\0').update(readFileSync(resolve(folder,name)));
   return hash.digest("hex");
 }
 
-export function requireValidatedModel(project) {
-  const gate = readGate(project);
+export function requireValidatedModel(project,options={}) {
+  const gate = readGate(project,options);
   const model = gate?.models?.find(entry => entry.name === project.selectedModel);
   if (gate?.verdict !== "pass" || !gate.geometryConnected || gate.selectedModel !== project.selectedModel || !model?.geometrySignature
       || model.geometryComponentSizes?.length !== 1
-      || geometrySignature(resolve(dirs(project).sparse, model.name)) !== model.geometrySignature) {
+      || !/^[a-zA-Z0-9_-]+$/.test(model.name)
+      || geometrySignature(resolve(dirs(project,options).sparse, model.name)) !== model.geometrySignature) {
     throw Object.assign(new Error("几何连接未通过当前模型的检查。请先运行几何检查，或新建独立区域项目。"), { code: 409 });
   }
 }
@@ -111,25 +102,27 @@ export function requireValidatedModel(project) {
 function datasetSignature(folder) {
   const hash = createHash("sha256");
   for (const name of ["cameras.bin", "images.bin", "points3D.bin"]) hash.update(readFileSync(resolve(folder, name)));
+  for(const name of ['frames.bin','rigs.bin'])if(existsSync(resolve(folder,name)))hash.update(name).update('\0').update(readFileSync(resolve(folder,name)));
   return hash.digest("hex");
 }
 
 function recordDatasetProvenance(project) {
   requireValidatedModel(project);
   const d = dirs(project);
-  const origin = { model: project.selectedModel,
+  const origin = { model: project.selectedModel, attemptId: project.activeAttemptId??null,
     geometrySignature: geometrySignature(resolve(d.sparse, project.selectedModel)),
     datasetSignature: datasetSignature(resolve(d.undistorted, "sparse")) };
   writeFileSync(resolve(d.undistorted, "geometry-source.json"), JSON.stringify(origin));
 }
 
-export function requireTrainingDataset(project, { preparingResume = false } = {}) {
+export function requireTrainingDataset(project, { preparingResume = false, attemptId = project.activeAttemptId??null } = {}) {
+  project = {...project,activeAttemptId:attemptId};
   requireValidatedModel(project);
   const d = dirs(project);
   let origin;
   try {
     origin = JSON.parse(readFileSync(resolve(d.undistorted, "geometry-source.json"), "utf8"));
-    if (origin.model !== project.selectedModel
+    if ((origin.attemptId??null)!==attemptId || origin.model !== project.selectedModel
         || origin.geometrySignature !== geometrySignature(resolve(d.sparse, project.selectedModel))
         || origin.datasetSignature !== datasetSignature(resolve(d.undistorted, "sparse"))) throw new Error("stale");
   } catch {
@@ -175,13 +168,14 @@ export function buildSteps() {
     {
       id: "prepare",
       name: "照片预处理",
-      clean: (d) => [d.images, resolve(d.root, "contact-sheets"), resolve(d.root, "manifest.json")],
+      clean: (d) => [d.images, resolve(d.workspace, "contact-sheets"), d.manifest],
       command: (project) => ({
         cmd: TOOLS.python,
         args: [
           resolve(PY_DIR, "prepare_project.py"),
-          "--source", project.sourceDir,
-          "--project", dirs(project).root,
+          ...(project.photoSources??[project.sourceDir]).flatMap(path=>['--source',path]),
+          "--project", dirs(project).workspace,
+          "--images-relative", project.activeAttemptId ? "inputs/images" : "images",
           "--long-edge", "2048",
           "--min-long-edge", "1000",
           "--ffmpeg", TOOLS.ffmpeg,
@@ -296,7 +290,7 @@ export function buildSteps() {
           resolve(PY_DIR, "gate_model.py"),
           "--model-root", dirs(project).sparse,
           "--database", matchingDatabase(project),
-          "--manifest", resolve(dirs(project).root, "manifest.json"),
+          "--manifest", dirs(project).manifest,
           "--out", dirs(project).summary,
           "--min-ratio", String(GATE.minRatio),
           "--max-error", String(GATE.maxError),

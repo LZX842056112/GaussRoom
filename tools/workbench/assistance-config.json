@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "minSharedPoints": 8,
+  "minViewsPerSide": 2,
+  "minParallaxDeg": 1,
+  "maxReprojectionPx": 4,
+  "minImageSpanFraction": 0.08,
+  "minSecondSingularRatio": 0.02,
+  "maxAlignmentResidualFraction": 0.02,
+  "minLocalImprovementPx": 0.25,
+  "minLocalImprovementFraction": 0.1,
+  "seed": 42,
+  "maxAnswers": 200,
+  "maxObjects": 100,
+  "maxLandmarks": 2000,
+  "maxObservationsPerPoint": 32,
+  "maxDimensions": 100,
+  "maxPolygonVertices": 64,
+  "maxLabelLength": 120
+}

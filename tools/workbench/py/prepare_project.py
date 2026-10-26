@@ -92,8 +92,9 @@ def contact_sheets(thumbs, folder):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source", required=True, type=Path)
+    parser.add_argument("--source", required=True, type=Path, action='append')
     parser.add_argument("--project", required=True, type=Path)
+    parser.add_argument("--images-relative", default="images")
     parser.add_argument("--long-edge", type=int, default=2048)
     parser.add_argument("--min-long-edge", type=int, default=1000)
     parser.add_argument("--quality", type=int, default=94)
@@ -101,12 +102,16 @@ def main():
     parser.add_argument("--force", action="store_true")
     args = parser.parse_args()
 
-    source = args.source.resolve()
-    if not source.is_dir():
-        print(f"源目录不存在：{source}", file=sys.stderr)
-        return 3
+    sources = [path.resolve() for path in args.source]
+    source = sources[0]
+    for folder in sources:
+        if not folder.is_dir():
+            print(f"源目录不存在：{folder}", file=sys.stderr)
+            return 3
 
-    images_dir = args.project / "images"
+    images_dir = (args.project / args.images_relative).resolve()
+    if not images_dir.is_relative_to(args.project.resolve()):
+        raise ValueError('工作照片目录必须在项目内')
     sheets_dir = args.project / "contact-sheets"
     manifest_path = args.project / "manifest.json"
     if images_dir.exists() and any(images_dir.iterdir()) and not args.force:
@@ -120,9 +125,8 @@ def main():
     if manifest_path.exists():
         manifest_path.unlink()
 
-    files = sorted((p for p in source.iterdir()
-                    if p.is_file() and p.suffix.lower() in SUFFIXES),
-                   key=lambda p: p.name.lower())
+    files = [p for folder in sources for p in sorted(folder.iterdir(),key=lambda p:p.name.lower())
+             if p.is_file() and p.suffix.lower() in SUFFIXES]
     if not files:
         print(f"源目录内没有可用图片：{source}", file=sys.stderr)
         return 3
@@ -164,13 +168,14 @@ def main():
             folder.mkdir(exist_ok=True)
             out = folder / (path.stem + ".jpg")
             if out.exists():
-                item["excluded"] = "duplicate_output_name"
-            else:
+                out = folder / (path.stem + '-' + digest[:16] + '.jpg')
+            if not out.exists():
                 out_exif[34665] = dict(loaded["useful"])
                 out_exif[34665].update({40962: image.width, 40963: image.height})
                 out_exif[274] = 1
                 image.save(out, "JPEG", quality=args.quality, exif=out_exif)
                 item["work_image"] = out.relative_to(args.project).as_posix()
+                item["work_sha256"] = hashlib.sha256(out.read_bytes()).hexdigest()
                 item["camera_group"] = group["name"]
                 item["grouping_basis"] = basis
                 with Image.open(out) as check:
@@ -188,7 +193,7 @@ def main():
 
     changed = [r["name"] for r in records
                if hashlib.sha256(Path(r["source"]).read_bytes()).hexdigest() != r["sha256"]]
-    summary = {"source_dir": str(source),
+    summary = {"source_dir": str(source), "source_dirs": [str(path) for path in sources],
                "source_count": len(records),
                "retained_count": sum(not r["excluded"] for r in records),
                "excluded": [{"name": r["name"], "reason": r["excluded"]}

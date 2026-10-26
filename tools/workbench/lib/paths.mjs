@@ -3,6 +3,7 @@
 // is resolved against REPO, so the file stays portable.
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { execFileSync } from 'node:child_process';
 
 export const REPO = resolve(import.meta.dirname, "..", "..", "..");
 export const WORKBENCH = resolve(import.meta.dirname, "..");
@@ -32,5 +33,30 @@ export const TOOLS = {
 export function toolStatus() {
   const status = {};
   for (const [name, path] of Object.entries(TOOLS)) status[name] = existsSync(path);
+  for (const [name, value] of Object.entries(dependencyStatus())) status[name] = value.ok;
   return status;
+}
+
+let dependencyCache=null;
+const dependencyProbe = `import importlib,json
+result={}
+for key,module in [('pycolmap','pycolmap'),('opencv','cv2')]:
+ try:
+  imported=importlib.import_module(module)
+  result[key]={'ok':True,'version':getattr(imported,'__version__','unknown')}
+ except Exception as error:
+  result[key]={'ok':False,'error':str(error)}
+print(json.dumps(result))`;
+export function dependencyStatus({force=false,probe=execFileSync}={}) {
+  if(!force&&probe===execFileSync&&dependencyCache&&Date.now()-dependencyCache.at<60000)return dependencyCache.value;
+  let raw;
+  try {raw=JSON.parse(String(probe(TOOLS.python,['-c',dependencyProbe],{encoding:'utf8',timeout:8000,windowsHide:true,stdio:['ignore','pipe','pipe']})));}
+  catch(error){raw=Object.fromEntries(['pycolmap','opencv'].map(name=>[name,{ok:false,error:error.message}]));}
+  const value={};
+  for(const [key,module] of [['pycolmap','pycolmap'],['opencv','cv2']]){
+    const entry=raw[key]??{ok:false,error:'依赖检查没有返回结果'};
+    value[key]={...entry,ok:entry.ok===true,message:entry.ok?`${module} ${entry.version} 就绪`:`${module} 无法加载：${entry.error}`,repair:'uv sync --locked'};
+  }
+  if(probe===execFileSync)dependencyCache={at:Date.now(),value};
+  return value;
 }

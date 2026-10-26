@@ -20,6 +20,14 @@ sys.path.insert(0, str(REPO / "scripts"))
 from check_model import images, points, unpack  # noqa: E402 - needs the path tweak above
 
 
+def work_name(name):
+    name = name.replace('\\', '/')
+    for prefix in ('inputs/images/', 'images/'):
+        if name.startswith(prefix):
+            return name[len(prefix):]
+    return name
+
+
 def geometry_components(folder, views):
     """Connect cameras only through retained 3D point observations."""
     names = {view['id']: view['name'] for view in views}
@@ -59,6 +67,11 @@ def geometry_signature(folder):
         with (folder/name).open('rb') as handle:
             for block in iter(lambda: handle.read(1024*1024), b''):
                 digest.update(block)
+    for name in ('frames.bin','rigs.bin'):
+        if (folder/name).exists():
+            digest.update(name.encode());digest.update(b'\0')
+            with (folder/name).open('rb') as handle:
+                for block in iter(lambda:handle.read(1024*1024),b''):digest.update(block)
     return digest.hexdigest()
 
 
@@ -122,7 +135,7 @@ def strong_components(database_path):
     return info
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-root", required=True, type=Path)
     parser.add_argument("--database", required=True, type=Path)
@@ -132,7 +145,7 @@ def main():
     parser.add_argument("--max-error", type=float, default=2.0)
     parser.add_argument("--min-points", type=int, default=5000)
     parser.add_argument("--fragment-share", type=float, default=0.05)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if not args.model_root.is_dir():
         print(f"稀疏模型目录不存在：{args.model_root}", file=sys.stderr)
@@ -141,7 +154,7 @@ def main():
     expected = set()
     if args.manifest.exists():
         manifest = json.loads(args.manifest.read_text(encoding="utf-8"))
-        expected = {r["work_image"] for r in manifest["records"]
+        expected = {work_name(r["work_image"]) for r in manifest["records"]
                     if not r["excluded"] and r.get("work_image")}
     expected_count = len(expected)
 
@@ -154,7 +167,7 @@ def main():
         # manifest stores them relative to the project root. Normalise before
         # comparing, otherwise every image looks unregistered.
         registered = {
-            view["name"][len("images/"):] if view["name"].startswith("images/") else view["name"]
+            work_name(view["name"])
             for view in views
         }
         stats = points(folder / "points3D.bin")
@@ -170,9 +183,7 @@ def main():
             "geometryComponents": components,
             "geometrySignature": geometry_signature(folder),
             "unregistered": sorted(
-                name[len("images/"):] if name.startswith("images/") else name
-                for name in expected
-                if (name[len("images/"):] if name.startswith("images/") else name) not in registered
+                name for name in expected if name not in registered
             ),
         })
     models.sort(key=lambda model: model["registered"], reverse=True)
@@ -186,6 +197,7 @@ def main():
             candidates = bridge_candidates(args.database, models)
         except sqlite3.Error as error:
             print(f"读取特征数据库失败：{error}", file=sys.stderr)
+            return 1
 
     args.out.mkdir(parents=True, exist_ok=True)
     (args.out / "model-summary.json").write_text(json.dumps({

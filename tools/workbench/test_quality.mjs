@@ -57,6 +57,21 @@ test('stop-before-start requests never launch training', async () => {
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('training rejects a dataset after only its frame or rig pose changes',async t=>{
+ const fs=await import('node:fs');const p={...project,id:'quality-native-pose-test',selectedModel:'0'},d=pipeline.dirs(p);
+ for(const folder of [resolve(d.sparse,'0'),resolve(d.undistorted,'sparse'),d.summary])fs.mkdirSync(folder,{recursive:true});
+ t.after(()=>fs.rmSync(d.root,{recursive:true,force:true}));
+ for(const name of ['cameras.bin','images.bin','points3D.bin','frames.bin','rigs.bin']){
+  fs.writeFileSync(resolve(d.sparse,'0',name),name);fs.writeFileSync(resolve(d.undistorted,'sparse',name),name);
+ }
+ fs.writeFileSync(resolve(d.summary,'gate.json'),JSON.stringify({geometryValidationVersion:1,geometryConnected:true,verdict:'pass',selectedModel:'0',models:[{name:'0',geometryComponentSizes:[3],geometrySignature:geometrySignature(resolve(d.sparse,'0'))}]}));
+ for(const name of ['frames.bin','rigs.bin']){
+  buildSteps().find(step=>step.id==='undistort').verify(p);assert.doesNotThrow(()=>pipeline.requireTrainingDataset(p));
+  fs.appendFileSync(resolve(d.undistorted,'sparse',name),'changed native pose');
+  assert.throws(()=>pipeline.requireTrainingDataset(p),/去畸变/,`${name} must invalidate the training input`);
+ }
+});
+
 test('checkpoint resume preserves exports and verifies checkpoint identity before training', async () => {
   const fs = await import('node:fs');
   const { createHash } = await import('node:crypto');
@@ -89,7 +104,7 @@ test('checkpoint resume preserves exports and verifies checkpoint identity befor
     fs.writeFileSync(resolve(d.train, 'export_05000.ply'), 'retained');
     assert.equal(jobs.trainCleanWarning(p, { fromStep: 'train' }), null);
     assert.equal(jobs.trainCleanWarning(p, { fromStep: 'gate', untilStep: 'gate' }), null);
-    assert.equal(jobs.trainCleanWarning(p, { fromStep: 'undistort' }).code, 'train_clean_confirmation_required');
+    assert.equal(jobs.trainCleanWarning(p, { fromStep: 'undistort' }), null, 'new attempts retain earlier training outputs');
     assert.equal(train.verify(p).ok, false, '保留的旧导出不能证明训练完成');
     fs.writeFileSync(resolve(d.train, 'export_10000.ply'), 'newer checkpoint');
     assert.throws(() => pipeline.requireTrainingDataset(p), /更新的训练结果/);

@@ -1,3 +1,4 @@
+import {mountAssistance} from './assistance.js';
 const state = {
   view: "empty",
   projects: [],
@@ -11,6 +12,7 @@ const state = {
   logStep: null,
   logStepPicked: false,
   editing: false,
+  historyScene:null,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -27,12 +29,12 @@ const formatBytes = (bytes) => {
 };
 
 const PROJECT_STATE = {
-  idle: "未开始", running: "运行中", aborting: "正在中止", done: "已完成",
-  failed: "失败", aborted: "已中止", partial: "部分完成",
+  idle: "未开始", running: "运行中", aborting: "正在中止", done: "模型已生成",
+  failed: "失败", aborted: "已中止", partial: "部分完成",needs_input:"等待用户补充",
 };
 const STEP_STATE = {
   pending: "待运行", running: "运行中", success: "完成",
-  failed: "失败", aborted: "已中止", blocked: "已阻断",
+  failed: "失败", aborted: "已中止", blocked: "已阻断",needs_input:"等待用户补充",
 };
 
 async function api(path, options = {}) {
@@ -48,6 +50,9 @@ async function api(path, options = {}) {
   }
   return payload;
 }
+const assistance=mountAssistance($("assistancePanel"),{api,onProjectChange:async()=>{
+ const id=state.project.id,project=await api(`/api/projects/${id}`);if(state.project?.id!==id)return;state.project=project;renderProject();await refreshEvidence();
+},onSceneChange:scene=>{state.historyScene=scene;renderProject();}});
 
 function show(view) {
   state.view = view;
@@ -60,11 +65,12 @@ async function loadHealth() {
   const health = await api("/api/health");
   const labels = {
     python: "Python", colmapGpu: "COLMAP(GPU)", colmapCpu: "COLMAP(CPU)",
-    brush: "Brush", ffmpeg: "ffmpeg",
+    brush: "Brush", ffmpeg: "ffmpeg", pycolmap: "pycolmap", opencv: "OpenCV",
   };
   $("health").innerHTML = Object.entries(labels).map(([key, label]) => {
     const ok = health.tools[key];
-    return `<span class="chip ${ok ? "ok" : "bad"}">${label} ${ok ? "就绪" : "缺失"}</span>`;
+    const details=health.dependencyDetails?.[key];
+    return `<span class="chip ${ok ? "ok" : "bad"}" title="${escapeHtml(details?`${details.message}；${details.repair}`:label)}">${label} ${ok ? "就绪" : "缺失"}</span>`;
   }).join("") + (health.diskFreeBytes != null
     ? `<span class="chip ${health.diskFreeBytes < 20e9 ? "bad" : "ok"}">可用磁盘 ${formatBytes(health.diskFreeBytes)}</span>`
     : "");
@@ -137,7 +143,7 @@ function viewerUrl(project, stamp) {
       extra += `&radius=${pose.extent.toFixed(4)}`;
     }
   }
-  return `/viewer.html?scene=/api/projects/${project.id}/scene.ply&t=${stamp}${extra}`;
+  return `/viewer.html?scene=${encodeURIComponent(project.scene?.url??`/api/projects/${project.id}/scene.ply`)}&t=${stamp}${extra}`;
 }
 
 function stepProgressText(step) {  if (step.status === "success") return "完成";
@@ -166,7 +172,8 @@ function renderSteps(project) {
     const row = list.children[index];
     row.querySelector(".dot").className = `dot ${step.status}`;
     row.querySelector(".label").textContent = step.name;
-    row.querySelector(".note").textContent = step.note ? ` ${step.note}` : "";
+    const note=step.id==='gate'&&step.status==='success'?'几何检查已通过':step.note;
+    row.querySelector(".note").textContent = note ? ` ${note}` : "";
     row.querySelector(".err").textContent = step.error ? ` ${step.error}` : "";
     row.querySelector(".err").style.color = step.error ? "var(--danger)" : "";
     const stateCell = row.querySelector(".step-state");
@@ -220,14 +227,16 @@ function renderProject() {
 
   renderSteps(project);
 
-  $("runButton").disabled = running;
+  $("runButton").disabled = running||project.state==='needs_input';
   $("runButton").textContent = project.steps.some((step) => step.status === "success") ? "继续重建" : "开始重建";
   $("abortButton").classList.toggle("hidden", !running);
   $("deleteButton").disabled = running;
 
   const banner = $("banner");
   const nextStep = project.steps.find((step) => step.status !== "success");
-  if (project.state === "failed" || project.state === "aborted") {
+  if(project.state==='needs_input'){
+    banner.className='banner warn';banner.textContent='等待用户补充。请在辅助重建中保存回答，再继续求解。';
+  } else if (project.state === "failed" || project.state === "aborted") {
     banner.className = "banner failed";
     banner.textContent = project.lastError ?? "重建失败";
   } else if (!running && project.gate && project.gate.verdict !== "pass") {
@@ -235,15 +244,14 @@ function renderProject() {
     banner.textContent = project.gate.message;
   } else if (project.state === "done") {
     banner.className = "banner done";
-    banner.textContent = `重建完成：export_${project.scene?.step}（${formatBytes(project.scene?.size)}）`;
+    banner.textContent = `模型已生成：export_${project.scene?.step}（${formatBytes(project.scene?.size)}）。${project.quality?.complete?'完整检查已通过。':'请检查几何、覆盖和实际画面。'}`;
   } else if (running) {
     banner.className = "banner running";
     banner.textContent = `正在运行「${project.steps.find((s) => s.status === "running")?.name ?? "…"}」`;
   } else if (nextStep?.id === "train" && project.scene) {
     banner.className = "banner warn";
     banner.textContent =
-      `已有导出场景。再次开始会先清空项目的 train/ 目录（含 ${project.scene.name ?? "export_*.ply"}），`
-      + "并从头训练；届时会再次向你确认。";
+      '已有导出场景。重新训练将使用新的尝试，并保留原有模型。';
   } else if (project.gate && project.gate.verdict !== "pass") {
     banner.className = "banner warn";
     banner.textContent = project.gate.message;
@@ -252,13 +260,14 @@ function renderProject() {
     banner.textContent = "";
   }
 
-  const hasScene = Boolean(project.scene);
+  const viewingProject=state.historyScene?{...project,scene:state.historyScene}:project;
+  const hasScene = Boolean(viewingProject.scene);
   $("viewerCard").classList.toggle("hidden", !hasScene);
   if (hasScene) {
-    const wanted = viewerUrl(project, project.scene.step);
+    const wanted = viewerUrl(viewingProject, viewingProject.scene.step);
     if ($("viewer").getAttribute("src") !== wanted) $("viewer").setAttribute("src", wanted);
     $("viewerNote").textContent =
-      `场景文件：${project.scene.path}（${formatBytes(project.scene.size)}）。若长时间停留在“正在加载”，请确认浏览器支持 WebGL2。`;
+      `${state.historyScene?'历史模型。':''}场景文件：${viewingProject.scene.path}（${formatBytes(viewingProject.scene.size)}）。若长时间停留在“正在加载”，请确认浏览器支持 WebGL2。`;
   }
 
   const options = project.steps.map((step) => `<option value="${step.id}">${escapeHtml(step.name)}</option>`).join("");
@@ -293,7 +302,7 @@ function connectEvents(id) {
     state.project = JSON.parse(event.data);
     renderProject();
     loadProjects().catch(() => {});
-    if (["done", "failed", "aborted", "partial"].includes(state.project.state)) refreshEvidence();
+    if (["done", "failed", "aborted", "partial","needs_input"].includes(state.project.state)) refreshEvidence();
   });
 
   source.addEventListener("progress", (event) => {
@@ -326,9 +335,13 @@ function connectEvents(id) {
 
 async function refreshEvidence() {
   if (!state.project) return;
+  const projectId=state.project.id;
   try {
-    const data = await api(`/api/projects/${state.project.id}/summary`);
-    const gate = data.gate;
+    const data = await api(`/api/projects/${projectId}/summary`);
+    if(state.project?.id!==projectId)return;
+    assistance.update(state.project,data);
+    const gate = data.pendingGate??data.gate;
+    const evidenceImage=name=>`/api/projects/${projectId}/image?${new URLSearchParams({name,...(data.pendingGate&&state.project.pendingAttemptId?{attemptId:state.project.pendingAttemptId}:{})})}`;
     const blocks = [];
     if (gate) {
       blocks.push(`<p><strong>门禁结论：</strong>${escapeHtml(gate.verdict)} — ${escapeHtml(gate.message)}</p>`);
@@ -363,7 +376,7 @@ async function refreshEvidence() {
       if (gate.bridgeCandidates?.length) {
         blocks.push(`<details><summary>跨区域候选照片：需要人工确认共同内容</summary><p class="muted">匹配点数量不能证明房间连接正确。请检查门框、墙角和固定家具，排除相似地砖。</p>`
           + gate.bridgeCandidates.map(pair => `<div class="bridge-pair"><p>${escapeHtml(pair.first)} ↔ ${escapeHtml(pair.second)}：${pair.inliers} 个匹配点；${escapeHtml(pair.configuration)}</p>`
-            + [pair.first, pair.second].map(name => `<a target="_blank" rel="noopener" href="/api/projects/${state.project.id}/image?name=${encodeURIComponent(name)}"><img loading="lazy" alt="${escapeHtml(name)}" src="/api/projects/${state.project.id}/image?name=${encodeURIComponent(name)}"></a>`).join("") + `</div>`).join("") + `</details>`);
+            + [pair.first, pair.second].map(name => `<a target="_blank" rel="noopener" href="${evidenceImage(name)}"><img loading="lazy" alt="${escapeHtml(name)}" src="${evidenceImage(name)}"></a>`).join("") + `</div>`).join("") + `</details>`);
       }
       if (gate.strongComponentSizes?.length) {
         blocks.push(`<p class="muted">强匹配连通分量大小：${gate.strongComponentSizes.join("、")}</p>`);
@@ -417,7 +430,7 @@ async function rerunWithGlobalMapper() {
   const ok = confirm(
     "将改用「全局式重建」重跑稀疏重建。\n\n"
     + "先校准相机，再联合求解相机位姿。仍需检查最终几何连接。\n"
-    + "代价：会清空现有的稀疏模型，去畸变与训练都需要重新跑。\n\n确定继续吗？",
+    + "本次使用新的尝试。旧模型会保留，去畸变与训练需要重新运行。\n\n确定继续吗？",
   );
   if (!ok) return;
   try {
@@ -434,7 +447,10 @@ async function rerunWithGlobalMapper() {
 }
 
 async function openProject(id) {
+  if(state.project?.id!==id)state.historyScene=null;
   state.project = await api(`/api/projects/${id}`);
+  const address=new URL(location.href);address.searchParams.set('project',id);window.history.replaceState(null,'',address);
+  assistance.update(state.project);
   state.logStep = null;
   state.logStepPicked = false;
   state.editing = false;
@@ -479,7 +495,10 @@ async function boot() {
   await loadHealth().catch(() => {});
   await loadProjects();
   show(state.projects.length ? "project" : "empty");
-  if (state.projects.length) await openProject(state.projects[0].id);
+  if (state.projects.length) {
+    const requested=new URLSearchParams(location.search).get('project');
+    await openProject((state.projects.find(p=>p.id===requested)??state.projects[0]).id);
+  }
 }
 
 $("newProject").onclick = async () => {
@@ -560,7 +579,7 @@ async function retryFrom(stepId) {
   const ok = confirm(
     `将从「${labels[stepId] ?? stepId}」重新开始。\n\n`
     + "该步骤及其之后的所有步骤都会被重置为待运行；已经成功的上游步骤保持不变。\n"
-    + "注意：特征提取会删除特征数据库，稀疏重建会删除已有模型，训练会清空 train/ 目录。",
+    + "本次使用新的尝试。旧数据库、模型和训练结果会保留。",
   );
   if (!ok) return;
   try {
@@ -626,13 +645,13 @@ $("saveEdit").onclick = async () => {
 };
 
 $("downloadScene").onclick = () => {
-  if (!state.project?.scene) return;
-  window.location.href = `/api/projects/${state.project.id}/scene.ply?download=1`;
+  const scene=state.historyScene??state.project?.scene;if(!scene)return;
+  window.location.href = `${scene.url??`/api/projects/${state.project.id}/scene.ply`}?download=1`;
 };
 
 $("reloadScene").onclick = () => {
-  if (!state.project?.scene) return;
-  $("viewer").setAttribute("src", viewerUrl(state.project, Date.now()));
+  const scene=state.historyScene??state.project?.scene;if(!scene)return;
+  $("viewer").setAttribute("src", viewerUrl({...state.project,scene}, Date.now()));
 };
 
 $("pauseScroll").onchange = (event) => { state.pauseScroll = event.target.checked; };

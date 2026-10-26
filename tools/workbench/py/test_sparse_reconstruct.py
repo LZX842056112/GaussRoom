@@ -55,7 +55,8 @@ class SparseTests(unittest.TestCase):
         self.module.reconstruct('colmap', self.database, Path('images'), Path(self.temp.name)/'sparse', 'incremental',
                                 run=lambda command, **kwargs: commands.append(command))
         self.assertEqual([c[1] for c in commands], ['mapper'])
-        self.assertEqual(commands[0][3], str(self.database))
+        self.assertNotEqual(commands[0][3], str(self.database))
+        self.assertEqual(Path(commands[0][3]).name, 'database-incremental.db')
 
     def test_nested_child_logs_reach_workbench_without_console(self):
         # Exercise the Windows process boundary, not just the runner arguments.
