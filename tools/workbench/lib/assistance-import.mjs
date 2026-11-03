@@ -72,6 +72,7 @@ export function reuseFacts(project,{expectedRevision,sourceProjectId,answerIds,c
 }
 export function importPhotos(project,{expectedRevision,sourceDir}){
  project=projects.read(project.id);
+ if(project.inputKind==='arkit_scan')throw inputError('手机扫描需要同帧标定和深度。请在手机补扫并导入新的完整扫描包。',409);
  if(['running','aborting'].includes(project.state))throw inputError('项目正在运行，请先等待或中止。',409);
  if(typeof sourceDir!=='string'||!sourceDir.trim()||!existsSync(sourceDir)||!statSync(sourceDir).isDirectory())throw inputError('请选择有效的照片目录');
  return (()=>{let result;

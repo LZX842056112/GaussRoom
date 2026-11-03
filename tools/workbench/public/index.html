@@ -16,7 +16,18 @@
 <div class="layout">
   <aside>
     <button id="newProject" class="primary" style="width:100%">+ 新建项目</button>
-    <ul id="projectList"></ul>
+    <details class="mobile-controls">
+  <summary>手机照片重建与 LiDAR 导入</summary>
+  <p id="mobileStatus" class="muted"></p>
+  <div id="mobileLinks"></div>
+  <div class="row"><button id="mobileEnable">启用连接</button><button id="mobileDisable">关闭连接</button></div>
+  <div id="mobileDevices"></div>
+  <label for="mobileZip">扫描包路径</label>
+  <input id="mobileZip" placeholder="C:\扫描.gaussroom.zip">
+  <button id="mobileImport">导入扫描包</button>
+  <p id="mobileError" class="muted"></p>
+</details>
+<ul id="projectList"></ul>
     <p id="listEmpty" class="muted" style="font-size:13px">还没有项目。</p>
   </aside>
 

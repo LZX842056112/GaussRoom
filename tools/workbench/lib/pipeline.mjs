@@ -1,5 +1,5 @@
 // Step definitions, command construction, progress parsing and gate thresholds.
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, writeFileSync, realpathSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import { PY_DIR, PROJECTS_DIR, TOOLS } from "./paths.mjs";
@@ -50,6 +50,20 @@ export const TRAINING_PRESETS = {
 
 export function dirs(project,options={}) { return artifactDirs(project,options); }
 
+/** Original captures stay immutable while attempts get their own work images. */
+function captureRoot(project) {
+  const capture = project.capture;
+  try {
+    const expected = resolve(dirs(project).root, 'capture');
+    if (capture?.format !== 'gaussroom_scan_v1' || !/^[a-f0-9]{64}$/.test(capture.manifestSha256 ?? '')
+        || resolve(capture.root ?? '') !== expected || realpathSync(expected) !== expected
+        || createHash('sha256').update(readFileSync(resolve(expected, 'manifest.json'))).digest('hex') !== capture.manifestSha256) throw new Error('changed');
+    return expected;
+  } catch {
+    throw Object.assign(new Error('手机扫描原始清单缺失或已改变。请重新导入完整扫描包；已有模型已保留。'), {code:409});
+  }
+}
+
 export function manifestSummary(project) {
   try {
     const manifest = JSON.parse(readFileSync(dirs(project).manifest, "utf8"));
@@ -74,7 +88,7 @@ export function readGate(project,options={}) {
 
 export function matchingDatabase(project,options={}) {
   const calibrated = resolve(dirs(project,options).sfm, "database-global.db");
-  return project.mapper === "global" && existsSync(calibrated)
+  return project.inputKind !== 'arkit_scan' && project.mapper === "global" && existsSync(calibrated)
     ? calibrated : resolve(dirs(project,options).sfm, "database.db");
 }
 
@@ -193,7 +207,14 @@ export function buildSteps() {
       name: "特征提取",
       clean: (d) => [resolve(d.sfm, "database.db")],
       ensure: (d) => [d.sfm],
-      command: (project) => ({
+      command: (project) => project.inputKind === 'arkit_scan' ? ({
+        cmd: TOOLS.python,
+        args: [resolve(PY_DIR, 'arkit_reconstruct.py'), 'features',
+          '--scan', captureRoot(project), '--manifest', dirs(project).manifest,
+          '--colmap', project.useGpu ? TOOLS.colmapGpu : TOOLS.colmapCpu,
+          '--database', resolve(dirs(project).sfm, 'database.db'), '--images', dirs(project).images,
+          '--gpu', project.useGpu ? '1' : '0', '--max-features', project.featurePreset === 'enhanced' ? '16384' : '8192'],
+      }) : ({
         cmd: project.useGpu ? TOOLS.colmapGpu : TOOLS.colmapCpu,
         args: [
           "feature_extractor",
@@ -256,6 +277,13 @@ export function buildSteps() {
             "--source", resolve(dirs(project).sfm, "component-source"),
             "--selection", resolve(dirs(project).sfm, "component-selection.json"),
             "--output", resolve(dirs(project).sparse, "0")],
+        };
+        if (project.inputKind === 'arkit_scan') return {
+          cmd: TOOLS.python,
+          args: [resolve(PY_DIR, 'arkit_reconstruct.py'), 'sparse',
+            '--scan', captureRoot(project), '--manifest', dirs(project).manifest,
+            '--database', resolve(dirs(project).sfm, 'database.db'),
+            '--images', dirs(project).images, '--output', dirs(project).sparse],
         };
         return {
           cmd: TOOLS.python,

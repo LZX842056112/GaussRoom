@@ -194,3 +194,8 @@ h3 { font-size: 14px; margin: 18px 0 8px; }
 .annotation-editor .row{flex-wrap:wrap;align-items:center}.annotation-editor button{white-space:nowrap}.annotation-editor select{max-width:240px}.annotation-editor label{display:block}
 .annotation-stage svg[data-interaction="move"],.annotation-stage svg[data-interaction="pan"]{cursor:grab}.annotation-stage svg[data-interaction="panning"],.annotation-stage svg[data-interaction="panning"] circle{cursor:grabbing}
 .quality-states{display:flex;flex-wrap:wrap;gap:10px 20px}.eval-pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px}.eval-pair figure{margin:8px 0}.eval-pair img{width:100%;height:auto}#assistancePanel textarea{width:100%;resize:vertical}
+
+.mobile-controls { margin: 16px 0; font-size: 13px; }
+.mobile-controls summary { cursor: pointer; }
+.mobile-controls input { width: 100%; margin: 6px 0; }
+.mobile-controls .row { margin: 6px 0; flex-wrap: wrap; }

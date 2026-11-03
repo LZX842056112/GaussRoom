@@ -119,6 +119,9 @@ const PATCHABLE = ["useGpu", "cameraModel", "featurePreset", "trainingPreset", "
 
 export function update(id, patch) {
   const project = read(id);
+  if (project.inputKind === 'arkit_scan' && ('cameraModel' in patch || 'mapper' in patch)) {
+    throw Object.assign(new Error('手机项目使用已保存的标定和相机位姿，不能修改相机模型或重建方式。'), {code:409});
+  }
   const geometrySettings=JSON.stringify([project.cameraModel,project.featurePreset??'standard',project.mapper??'incremental',project.selectedModel??null]);
   const running = ["running", "aborting"].includes(project.state);
   const applied = [];
@@ -226,6 +229,9 @@ export function summarise(project, now = Date.now()) {
     state: project.state,
     sourceDir: project.sourceDir,
     sourceImageCount: project.sourceImageCount,
+    inputKind: project.inputKind ?? 'photos',
+    capture: project.capture ? {format:project.capture.format,scanId:project.capture.scanId,manifestSha256:project.capture.manifestSha256} : null,
+    scaleSource: project.inputKind === 'arkit_scan' ? 'lidar' : 'unmeasured',
     trainingPreset: project.trainingPreset,
     useGpu: project.useGpu,
     cameraModel: project.cameraModel,
@@ -272,7 +278,7 @@ export function countImages(folder) {
   }
 }
 
-export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental", featurePreset = "standard" }) {
+export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental", featurePreset = "standard" }, {id:allocatedId} = {}) {
   ensureStore();
   const label = String(name ?? "").trim();
   if (!label) throw Object.assign(new Error("请填写项目名称"), { code: 400 });
@@ -295,13 +301,16 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
   if (!CAMERA_MODELS.includes(cameraModel)) throw Object.assign(new Error("未知相机模型"), { code: 400 });
   if (!FEATURE_PRESETS.includes(featurePreset)) throw Object.assign(new Error("未知特征档位"), { code: 400 });
 
-  const id = `${slugify(label)}-${randomBytes(3).toString("hex")}`;
+  if (allocatedId !== undefined && !isValidId(allocatedId)) throw Object.assign(new Error('项目 id 非法'), {code:400});
+  const id = allocatedId ?? `${slugify(label)}-${randomBytes(3).toString("hex")}`;
+  if (existsSync(projectPath(id))) throw Object.assign(new Error('项目已存在，不能覆盖'), {code:409});
   const now = new Date().toISOString();
   const project = {
     id,
     name: label,
     sourceDir: resolved,
     sourceImageCount: found,
+    inputKind: 'photos',
     createdAt: now,
     updatedAt: now,
     state: "idle",

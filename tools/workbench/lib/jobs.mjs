@@ -204,7 +204,7 @@ function processInfo(pid) {
 }
 
 const OUR_TOOLS = new Set(["colmap.exe", "brush_app.exe"]);
-const OWNED_SCRIPTS = new Set(["sparse_reconstruct.py", "extract_component.py", "prepare_project.py", "gate_model.py", "assistance_inputs.py", "assisted_reconstruct.py"]
+const OWNED_SCRIPTS = new Set(["sparse_reconstruct.py", "arkit_reconstruct.py", "extract_component.py", "prepare_project.py", "gate_model.py", "assistance_inputs.py", "assisted_reconstruct.py"]
   .map(name => resolve(PY_DIR, name).toLowerCase()));
 
 export function isOwnedProcess(project, info) {
@@ -588,6 +588,9 @@ export function start(projectId, options = {}, runtime = {}) {
     throw Object.assign(new Error("已有作业在运行，请先等待完成或中止"), { code: 409 });
   }
   const project = projects.read(projectId);
+  if (project.inputKind === 'arkit_scan' && runtime.assistanceRecord) {
+    throw inputError('手机项目保留扫描时的相机标定和位置。位置或连接有误时，请在手机补扫并导入新扫描包。',409);
+  }
   const order = pipeline.STEP_ORDER.map(step => step.id);
   if (options.untilStep && !order.includes(options.untilStep)) throw Object.assign(new Error("未知结束步骤"), { code: 400 });
   const startIndex = options.fromStep ? order.indexOf(options.fromStep)

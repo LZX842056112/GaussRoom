@@ -206,7 +206,7 @@ function renderProject() {
   const modelInfo = project.gate?.models?.length ? `${project.gate.models.length} 个模型` : "";
   $("projectMeta").textContent = [
     project.sourceDir,
-    `相机模型 ${project.cameraModel}`,
+    project.inputKind === "arkit_scan" ? "使用手机标定和相机位姿" : `相机模型 ${project.cameraModel}`,
     `重建方式 ${project.mapper === "global" ? "全局式" : "增量式"}`,
     `特征 ${project.featurePreset === "enhanced" ? "增强" : "标准"}`,
     project.componentSource ? "独立区域；整体布局未验证" : "",
@@ -220,9 +220,9 @@ function renderProject() {
     $("editGpu").checked = Boolean(project.useGpu);
     $("editCamera").value = project.cameraModel;
     $("editFeatures").value = project.featurePreset ?? "standard";
-    $("editCamera").disabled = Boolean(project.componentSource);
+    $("editCamera").disabled = Boolean(project.componentSource) || project.inputKind === "arkit_scan";
     $("editFeatures").disabled = Boolean(project.componentSource);
-    $("editHint").textContent = "修改相机模型或特征档位后，需要重新提取特征，并重跑后续步骤。独立区域项目使用已定位的数据。";
+    $("editHint").textContent = project.inputKind === "arkit_scan" ? "使用手机标定和相机位姿。" : "修改相机模型或特征档位后，需要重新提取特征，并重跑后续步骤。独立区域项目使用已定位的数据。";
   }
 
   const running = project.state === "running" || project.state === "aborting";
@@ -374,7 +374,7 @@ async function refreshEvidence() {
         blocks.push(`<p class="muted">稀疏重建分裂成多个模型时，工作台默认中止。若无法补拍，有两条路：`
           + `① 将一个独立区域复制到新项目，检查通过后训练；`
           + `② 校准相机后尝试全局式重建。全局式也可能产生独立区域。</p>`);
-        if (!state.project.componentSource) blocks.push(`<p><button id="useGlobalMapper">改用全局式重建重跑</button></p>`);
+        if (!state.project.componentSource && state.project.inputKind !== "arkit_scan") blocks.push(`<p><button id="useGlobalMapper">改用全局式重建重跑</button></p>`);
       }
       if (gate.geometryValidationVersion === 1) {
         blocks.push(`<p>最终几何分量（通过共享三维点检查）：</p>`);
@@ -643,7 +643,7 @@ $("saveEdit").onclick = async () => {
       body: JSON.stringify({
         name: $("editName").value,
         useGpu: $("editGpu").checked,
-        ...(state.project.componentSource ? {} : { cameraModel: $("editCamera").value,
+        ...(state.project.componentSource ? {} : { ...(state.project.inputKind === "arkit_scan" ? {} : {cameraModel: $("editCamera").value}),
           featurePreset: $("editFeatures").value }),
       }),
     });
@@ -697,3 +697,17 @@ boot().catch((error) => {
   document.body.insertAdjacentHTML("afterbegin",
     `<div class="banner failed">工作台初始化失败：${escapeHtml(error.message)}</div>`);
 });
+
+async function refreshMobile() {
+  const s = await api('/api/mobile/status');
+  $('mobileStatus').textContent = s.enabled ? `地址：${s.addresses.map(a => `http://${a}:${s.port}`).join('、') || '未发现局域网地址'}；配对码：${s.code ?? '已使用或过期，请关闭后重新启用'}` : '连接已关闭。';
+  const links=$('mobileLinks');links.replaceChildren();
+  for(const address of s.enabled?s.addresses:[]){const a=document.createElement('a');a.href=`http://${address}:${s.port}/mobile/`;a.textContent=`iPhone / 安卓：${a.href}`;a.target='_blank';a.rel='noopener';links.append(a,document.createElement('br'));}
+  const devices = $('mobileDevices'); devices.replaceChildren();
+  for (const d of s.devices) { const row=document.createElement('div'); row.className='row'; const label=document.createElement('span');label.textContent=d.deviceName; const button=document.createElement('button');button.textContent='撤销';button.onclick=()=>mobileAction('/api/mobile/revoke',{deviceId:d.deviceId});row.append(label,button);devices.append(row); }
+}
+async function mobileAction(path, body={}) { try { $('mobileError').textContent='';const result=await api(path,{method:'POST',body:JSON.stringify(body)});await refreshMobile();if(result.projectId){await loadProjects();await openProject(result.projectId);} } catch(error){$('mobileError').textContent=error.message;} }
+$('mobileEnable').onclick=()=>mobileAction('/api/mobile/enable');
+$('mobileDisable').onclick=()=>mobileAction('/api/mobile/disable');
+$('mobileImport').onclick=()=>mobileAction('/api/mobile/import',{path:$('mobileZip').value.trim()});
+refreshMobile().catch(error=>{$('mobileError').textContent=error.message;});

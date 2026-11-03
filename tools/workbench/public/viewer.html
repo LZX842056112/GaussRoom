@@ -32,16 +32,28 @@
     background: #0d1117; color: #c9d5e2; font: 15px/1.8 "Microsoft YaHei", system-ui, sans-serif;
     z-index: 3; text-align: center; padding: 24px;
   }
+  .touch-help, #mobileMove { display: none; }
+  #mobileMove button { min-width: 48px; min-height: 48px; touch-action: none; user-select: none; background: rgba(31,111,235,.85); }
+  #retry { display:none; margin:12px auto; }
+  @media (pointer:coarse) {
+    .mouse-help { display:none; }
+    .touch-help { display:block; }
+    .hud { left:max(8px,env(safe-area-inset-left)); top:max(8px,env(safe-area-inset-top)); max-width:280px; padding:8px 10px; font-size:12px; }
+    #mobileMove { display:grid; grid-template-columns:repeat(3,48px); gap:6px; position:fixed; bottom:max(14px,env(safe-area-inset-bottom)); right:max(14px,env(safe-area-inset-right)); z-index:2; }
+    #mobileMove [data-move="KeyW"] { grid-column:2; }
+    #mobileMove [data-move="KeyA"] { grid-column:1; }
+  }
 </style>
 </head>
 <body>
-<div id="loading">正在加载三维场景…<br><span id="loadingDetail">准备中</span></div>
+<div id="loading"><div>正在加载三维场景…<br><span id="loadingDetail">准备中</span><button id="retry">重新加载</button></div></div>
 
 <div class="hud">
   <h1>室内三维漫游</h1>
-  <p>鼠标右键拖动：360° 旋转（左右不限，上下到头为止）</p>
-  <p>鼠标左键拖动：平移　滚轮：缩放（拉远可见整体模型）</p>
-  <p><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</p>
+  <p class="mouse-help">鼠标右键拖动：旋转</p>
+  <p class="mouse-help">鼠标左键拖动：平移　滚轮：缩放</p>
+  <p class="mouse-help"><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> 移动</p>
+  <p class="touch-help">单指旋转。双指平移或缩放。按箭头移动。</p>
   <div class="row">
     <button id="reset">重置视角</button>
     <label><input id="cutToggle" type="checkbox"> 切开顶部</label>
@@ -56,6 +68,12 @@
   <div id="status">等待场景…</div>
 </div>
 
+<div id="mobileMove" aria-label="漫游移动">
+  <button data-move="KeyW" aria-label="向前">↑</button>
+  <button data-move="KeyA" aria-label="向左">←</button>
+  <button data-move="KeyS" aria-label="向后">↓</button>
+  <button data-move="KeyD" aria-label="向右">→</button>
+</div>
 <script type="importmap">
 {
   "imports": {
@@ -70,15 +88,19 @@
 import * as THREE from "three";
 import { SparkRenderer, SplatMesh, SplatEdit, SplatEditSdf } from "@sparkjsdev/spark";
 import { screenRadiusLimit } from "./render-limits.mjs";
+import { installTouchGestures } from "./touch-controls.mjs";
 
 const loading = document.getElementById("loading");
 const loadingDetail = document.getElementById("loadingDetail");
 const status = document.getElementById("status");
+const retry = document.getElementById('retry');
+retry.onclick = () => location.reload();
 
 function fail(message) {
   loading.style.display = "flex";
   loadingDetail.textContent = message;
   status.textContent = "加载失败";
+  retry.style.display = 'block';
 }
 
 const scene = new THREE.Scene();
@@ -288,6 +310,7 @@ function pan(dx, dy) {
 }
 
 canvas.addEventListener("pointerdown", (event) => {
+  if (event.pointerType === 'touch') return;
   // 左键(0) 平移，右键(2) 360° 旋转；其余按键忽略。
   if (event.button !== 0 && event.button !== 2) return;
   dragId = event.pointerId;
@@ -295,6 +318,7 @@ canvas.addEventListener("pointerdown", (event) => {
   canvas.setPointerCapture(event.pointerId);
 });
 canvas.addEventListener("pointermove", (event) => {
+  if (event.pointerType === 'touch') return;
   if (event.pointerId !== dragId) return;
   if (dragButton === 0) pan(event.movementX, event.movementY);
   else if (dragButton === 2) orbit(event.movementX, event.movementY);
@@ -305,6 +329,16 @@ function endDrag() {
 }
 for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) {
   canvas.addEventListener(type, endDrag);
+}
+
+installTouchGestures(canvas, {orbit,pan,zoom:factor=>{
+  distance=THREE.MathUtils.clamp(distance*factor,MIN_DISTANCE,maxDistance);updateCamera();
+}});
+for (const button of document.querySelectorAll('[data-move]')) {
+  button.addEventListener('pointerdown', event=>{
+    event.preventDefault();button.setPointerCapture(event.pointerId);keys.add(button.dataset.move);
+  });
+  for (const type of ['pointerup','pointercancel','lostpointercapture']) button.addEventListener(type,()=>keys.delete(button.dataset.move));
 }
 
 // 右键要用于旋转，必须阻止浏览器右键菜单。

@@ -29,6 +29,13 @@ tools/viewer-vendor/
 
 # ---- Agent 本地状态 ----
 .workbuddy-ai/
+.superpowers/
+
+# ---- iOS build output and local signing state ----
+DerivedData/
+*.xcuserstate
+xcuserdata/
+.build/
 
 # ---- IDE / 编辑器本地配置 ----
 .idea/

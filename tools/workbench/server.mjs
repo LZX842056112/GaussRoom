@@ -1,5 +1,6 @@
 // Reconstruction workbench: local-only HTTP service for the browser UI.
 import { createServer } from "node:http";
+import { createMobileGateway } from "./lib/mobile.mjs";
 import { existsSync, readFileSync, realpathSync, statfsSync } from "node:fs";
 import { resolve, sep } from "node:path";
 import { pathToFileURL } from 'node:url';
@@ -17,6 +18,7 @@ import {previewFactReuse,reuseFacts,importPhotos} from './lib/assistance-import.
 
 export function createWorkbenchServer({getContext=defaultGetContext,jobRuntime={}}={}) {
 const router = createRouter();
+const mobile = createMobileGateway({jobRuntime});
 const fail = (response, error) => sendJson(response, Number.isInteger(error.code)&&error.code>=400&&error.code<=599?error.code:500, {
   error: error.message,
   ...(error.details ? { details: error.details } : {}),
@@ -31,6 +33,11 @@ function diskFreeBytes() {
   }
 }
 
+router.get('/api/mobile/status', (request,response)=>sendJson(response,200,mobile.status()));
+router.post('/api/mobile/enable', async (request,response)=>sendJson(response,200,await mobile.enable()));
+router.post('/api/mobile/disable', async (request,response)=>{await mobile.disable();sendJson(response,200,mobile.status());});
+router.post('/api/mobile/revoke', async (request,response)=>{const body=await readJson(request);mobile.revoke(body.deviceId);sendJson(response,200,mobile.status());});
+router.post('/api/mobile/import', async (request,response)=>{const body=await readJson(request);sendJson(response,200,await mobile.offlineImport(body.path));});
 router.get("/api/health", (request, response) => {
   sendJson(response, 200, {
     ok: true,
@@ -319,6 +326,14 @@ const server = createServer(async (request, response) => {
   // async handler and take the whole process down with an unhandled rejection.
   try {
     const url = new URL(request.url, "http://127.0.0.1");
+    if (url.pathname.startsWith('/api/mobile/')) {
+      const host = request.headers.host ?? '';
+      const origin = request.headers.origin;
+      if (!/^(?:127\.0\.0\.1|localhost|\[::1\])(?::\d+)?$/i.test(host) ||
+          (origin && origin !== `http://${host}`) || request.headers['sec-fetch-site'] === 'cross-site') {
+        sendJson(response, 403, {error:'仅允许本机工作台访问'}); return;
+      }
+    }
     const method = request.method === "HEAD" ? "GET" : request.method;
     const hit = router.match(method, url.pathname);
     if (hit) {
@@ -331,6 +346,7 @@ const server = createServer(async (request, response) => {
     else response.destroy();
   }
 });
+server.on("close",()=>{ void mobile.disable(); });
 return server;
 }
 
