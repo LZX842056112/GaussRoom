@@ -22,6 +22,39 @@ test('gateway starts disabled, pairs and revokes a device', async () => {
  } finally { await gateway.disable(); rmSync(root,{recursive:true,force:true}); }
 });
 
+test('startup reads existing photo grants without rewriting unchanged device state',async t=>{
+ const {mkdirSync,writeFileSync}=await import('node:fs');const {randomUUID}=await import('node:crypto');
+ const root=mkdtempSync(join(tmpdir(),'mobile-grant-read-')),deviceId=randomUUID(),sessionId=randomUUID(),projectId=`mobile-${randomUUID()}`;
+ t.after(()=>rmSync(root,{recursive:true,force:true}));
+ writeFileSync(join(root,'state.json'),JSON.stringify({devices:{[deviceId]:{deviceName:'existing',tokenHash:'a'.repeat(64),projects:[projectId]}},scans:{}}));
+ const folder=join(root,'photos',sessionId);mkdirSync(folder,{recursive:true});writeFileSync(join(folder,'session.json'),JSON.stringify({id:sessionId,deviceId,projectId,status:'committed',files:[]}));
+ mkdirSync(join(root,'state.json.tmp')); // Any unnecessary persist would fail.
+ const gateway=createMobileGateway({stateRoot:root});assert.equal(gateway.status().devices.length,1);await gateway.disable();
+});
+
+test('pairing restores removed gateway directories and both upload entry points remain usable', async t => {
+ const {renameSync,readFileSync}=await import('node:fs');const {resolve,sep}=await import('node:path');const {randomUUID}=await import('node:crypto');
+ const root=mkdtempSync(join(tmpdir(),'mobile-missing-state-')),stateRoot=join(root,'state'),backup=join(root,'saved-state');
+ const gateway=createMobileGateway({stateRoot,photoCapabilities:async()=>({photoFormats:['.jpg','.jpeg','.png']})});
+ t.after(async()=>{await gateway.disable();rmSync(root,{recursive:true,force:true});});
+ const info=await gateway.enable({port:0,host:'127.0.0.1'}),base=`http://127.0.0.1:${info.port}/api/mobile/v1`;
+ assert.ok(resolve(stateRoot).startsWith(resolve(root)+sep));assert.ok(resolve(backup).startsWith(resolve(root)+sep));renameSync(stateRoot,backup);
+ let r=await fetch(base+'/pair',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({code:info.code,deviceName:'手机'})});
+ assert.equal(r.status,200);const device=await r.json(),headers={authorization:`Bearer ${device.token}`,'content-type':'application/json'};
+ assert.equal(JSON.parse(readFileSync(join(stateRoot,'state.json'),'utf8')).devices[device.deviceId].deviceName,'手机');
+ r=await fetch(base+'/photo-sessions',{method:'POST',headers,body:JSON.stringify({name:'restored'})});assert.equal(r.status,200);assert.equal((await r.json()).status,'open');
+ r=await fetch(base+'/uploads',{method:'POST',headers,body:JSON.stringify({scanId:randomUUID(),sha256:'a'.repeat(64),bytes:123})});assert.equal(r.status,200);assert.equal((await r.json()).offset,0);
+});
+
+test('failed pairing persistence keeps the code retryable and leaves no unsaved authorized device',async t=>{
+ const {mkdirSync,rmdirSync}=await import('node:fs');const root=mkdtempSync(join(tmpdir(),'mobile-write-failure-')),blocked=join(root,'state.json.tmp');
+ const gateway=createMobileGateway({stateRoot:root});t.after(async()=>{await gateway.disable();rmSync(root,{recursive:true,force:true});});
+ const info=await gateway.enable({port:0,host:'127.0.0.1'}),url=`http://127.0.0.1:${info.port}/api/mobile/v1/pair`,body=JSON.stringify({code:info.code,deviceName:'retry'});
+ mkdirSync(blocked);let r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body});assert.equal(r.status,503);const error=await r.json();assert.match(error.error,/保存/);assert.equal(error.error.includes(root),false);
+ assert.deepEqual(gateway.status().devices,[]);assert.equal(gateway.status().code,info.code);
+ rmdirSync(blocked);r=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body});assert.equal(r.status,200);assert.ok((await r.json()).token);assert.equal(gateway.status().devices.length,1);
+});
+
 test('upload persists its offset, enforces ownership and commits once', async () => {
  const {mkdirSync,writeFileSync,readFileSync}=await import('node:fs'); const {createHash,randomUUID}=await import('node:crypto');
  const root=mkdtempSync(join(tmpdir(),'mobile-test-')),projectRoot=join(root,'projects');mkdirSync(projectRoot);

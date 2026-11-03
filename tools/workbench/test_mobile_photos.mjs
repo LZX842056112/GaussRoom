@@ -10,7 +10,7 @@ import { createPhotoSessions } from './lib/photo-sessions.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 function fixture(t, extra={}) {
  const root=mkdtempSync(join(tmpdir(),'photo-sessions-')), projects=join(root,'projects'), state=join(root,'state'); mkdirSync(projects);
- const store={projectPath:id=>join(projects,id,'project.json'), read(id){return JSON.parse(readFileSync(this.projectPath(id)));}, write(p){writeFileSync(this.projectPath(p.id),JSON.stringify(p)); return p;}, create(data,{id}) {const d=dirname(this.projectPath(id)); if(existsSync(d)) throw Object.assign(new Error('exists'),{code:409}); mkdirSync(d); return this.write({id,...data});}};
+ const store={projectPath:id=>join(projects,id,'project.json'), read(id){return JSON.parse(readFileSync(this.projectPath(id)));}, write(p){writeFileSync(this.projectPath(p.id),JSON.stringify(p)); return p;}, remove(id){const path=dirname(this.projectPath(id));assert.equal(dirname(path),projects);rmSync(path,{recursive:true,force:true});},create(data,{id}) {const d=dirname(this.projectPath(id)); if(existsSync(d)) throw Object.assign(new Error('exists'),{code:409}); mkdirSync(d); return this.write({id,...data});}};
  let active=true; const grants=[];
  const opts={root:state,projectStore:store,getCapabilities:async()=>({photoFormats:['.jpg','.jpeg','.png']}),validatePhoto:async p=>{const b=readFileSync(p);return {extension:'.jpg',format:'JPEG',width:1200,height:800,bytes:b.length,sha256:hash(b)};},grantProject:(d,p)=>grants.push([d,p]),isDeviceActive:()=>active,limits:{maxFileBytes:10,maxBatchBytes:25,maxFiles:4},...extra};
  let service=createPhotoSessions(opts);
@@ -21,6 +21,39 @@ function fixture(t, extra={}) {
 async function start(f) {await new Promise(ok=>f.server.listen(0,'127.0.0.1',ok)); return `http://127.0.0.1:${f.server.address().port}/api/mobile/v1/photo-sessions`;}
 async function call(url,method='GET',body,device='a') {const binary=Buffer.isBuffer(body); const r=await fetch(url,{method,headers:{device,...(body!==undefined&&!binary?{'content-type':'application/json'}:{})},body:body===undefined?undefined:binary?body:JSON.stringify(body)});return [r.status,await r.json()];}
 async function add(url,name,bytes) {const [,b]=await call(url+'/files','POST',{name,bytes}); return b.fileId;}
+
+test('only an active owner can delete an open batch and its uploaded files',async t=>{
+ const f=fixture(t),base=await start(f),s=(await call(base,'POST',{name:'delete batch'}))[1],url=base+'/'+s.id;
+ const id=await add(url,'a.jpg',3);await call(url+'/files/'+id,'PUT',Buffer.from('abc'));
+ assert.equal((await call(url,'DELETE',undefined,'b'))[0],404);assert.equal(existsSync(join(f.state,s.id,'ready',id+'.jpg')),true);
+ assert.equal((await call(url,'DELETE'))[0],200);assert.equal(existsSync(join(f.state,s.id)),false);assert.deepEqual((await call(base))[1],[]);f.restart();assert.equal((await call(url))[0],404);
+ const denied=(await call(base,'POST',{name:'revoked'}))[1];f.revoke();assert.equal((await call(base+'/'+denied.id,'DELETE'))[0],401);assert.equal(existsSync(join(f.state,denied.id)),true);
+});
+
+test('project deletion rejects active work, preserves other projects and completes after a restart retry',async t=>{
+ let running=true;const revoked=[];const f=fixture(t,{jobStore:{current:()=>running?{}:null},revokeProject:(device,id)=>revoked.push([device,id])}),base=await start(f),s=(await call(base,'POST',{name:'delete project'}))[1],url=base+'/'+s.id;
+ const a=await add(url,'a.jpg',3),b=await add(url,'b.jpg',3);await call(url+'/files/'+a,'PUT',Buffer.from('abc'));await call(url+'/files/'+b,'PUT',Buffer.from('xyz'));
+ const p=(await call(url+'/commit','POST'))[1].projectId;const unrelated=join(f.root,'projects','unrelated');mkdirSync(unrelated);writeFileSync(join(unrelated,'keep'),'keep');
+ assert.equal((await call(url,'DELETE'))[0],409);assert.equal(existsSync(f.store.projectPath(p)),true);running=false;
+ const remove=f.store.remove;f.store.remove=()=>{throw new Error('locked private path '+f.root);};const failed=await call(url,'DELETE');assert.equal(failed[0],503);assert.equal(JSON.stringify(failed[1]).includes(f.root),false);assert.equal((await call(url))[1].status,'deleting');
+ const grants=f.grants.length;f.restart();assert.equal(f.grants.length,grants);f.store.remove=remove;
+ assert.equal((await call(url,'DELETE'))[0],200);assert.equal(existsSync(f.store.projectPath(p)),false);assert.equal(existsSync(join(f.state,s.id)),false);assert.deepEqual(revoked,[['a',p]]);assert.equal(readFileSync(join(unrelated,'keep'),'utf8'),'keep');
+});
+
+test('batch deletion refuses an unrelated project association',async t=>{
+ const f=fixture(t),base=await start(f),s=(await call(base,'POST',{name:'protected'}))[1],url=base+'/'+s.id;
+ const a=await add(url,'a.jpg',3),b=await add(url,'b.jpg',3);await call(url+'/files/'+a,'PUT',Buffer.from('abc'));await call(url+'/files/'+b,'PUT',Buffer.from('xyz'));
+ const p=f.store.read((await call(url+'/commit','POST'))[1].projectId);f.store.write({...p,photoSessionId:'other-session',sourceDir:join(f.root,'elsewhere')});
+ assert.equal((await call(url,'DELETE'))[0],409);assert.equal(existsSync(f.store.projectPath(p.id)),true);assert.equal((await call(url))[1].status,'committed');
+});
+
+test('retrying deletion removes project output even after project metadata was removed',async t=>{
+ const f=fixture(t),base=await start(f),s=(await call(base,'POST',{name:'partial delete'}))[1],url=base+'/'+s.id;
+ const a=await add(url,'a.jpg',3),b=await add(url,'b.jpg',3);await call(url+'/files/'+a,'PUT',Buffer.from('abc'));await call(url+'/files/'+b,'PUT',Buffer.from('xyz'));
+ const p=(await call(url+'/commit','POST'))[1].projectId,folder=dirname(f.store.projectPath(p));writeFileSync(join(folder,'output.ply'),'remaining');
+ const remove=f.store.remove;let calls=0;f.store.remove=function(id,options){calls++;if(calls===1){rmSync(this.projectPath(id));throw Error('locked output');}return remove.call(this,id,options);};
+ assert.equal((await call(url,'DELETE'))[0],503);f.restart();assert.equal((await call(url,'DELETE'))[0],200);assert.equal(calls,2);assert.equal(existsSync(folder),false);
+});
 
 test('ownership, limits, duplicate content, restart and idempotent commit',async t=>{
  const f=fixture(t), base=await start(f); let [status,s]=await call(base,'POST',{name:'batch'}); assert.equal(status,200); const url=base+'/'+s.id;

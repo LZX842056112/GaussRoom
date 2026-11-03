@@ -1,1 +1,85 @@
-<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>照片重建</title><link rel="stylesheet" href="/mobile/style.css"></head><body><main><header><h1>照片重建</h1><p>连接工作台，上传照片并创建模型。</p></header><p id="message" role="status" aria-live="polite"></p><section id="pairSection"><h2>1. 配对设备</h2><form id="pairForm"><label>配对码<input id="code" required inputmode="numeric" autocomplete="one-time-code"></label><label>设备名称<input id="device" required maxlength="100" value="手机浏览器"></label><button>配对</button></form></section><section id="createSection" hidden><h2>2. 创建照片批次</h2><form id="createForm"><label>项目名称<input id="name" required maxlength="100" value="照片项目"></label><label>训练档位<select id="preset"><option value="standard">标准</option><option value="fast">快速</option><option value="full">完整</option></select></label><button>创建批次</button></form><p id="limits"></p><label>已保存的批次<select id="sessions"><option value="">选择批次</option></select></label></section><section id="batchSection" hidden><h2>3. 上传照片</h2><p id="batchInfo"></p><p>如果不能打开相机，请先拍照，再从相册选择。原始照片不会被压缩。</p><div class="actions"><label class="button">拍照<input id="camera" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" capture="environment"></label><label class="button">选择相册<input id="gallery" type="file" accept=".jpg,.jpeg,.png" multiple></label></div><p id="formatNote"></p><p id="uploadProgress" role="status" aria-live="polite"></p><p id="reselect"></p><ul id="queued"></ul><button id="retryQueue" hidden>继续上传待处理照片</button><ul id="files"></ul><button id="commit">提交照片并创建项目</button></section><section id="projectSection" hidden><h2>4. 重建与查看</h2><p id="projectInfo"></p><button id="run">开始重建</button> <a id="viewer" class="button" hidden>打开模型</a><p id="progress"></p><p id="timing"></p><p id="quality"></p><ul id="steps"></ul></section></main><script type="module" src="/mobile/app.js"></script></body></html>
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f3f6fb">
+  <title>GaussRoom · 照片重建</title>
+  <link rel="stylesheet" href="/mobile/style.css">
+</head>
+<body>
+<main>
+  <header class="appbar">
+    <a class="brand" href="/mobile/" aria-label="GaussRoom 手机重建首页">
+      <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="m12 3 8 4.5v9L12 21l-8-4.5v-9L12 3Z"/><path d="m4 7.5 8 4.6 8-4.6M12 12v9m-4-8.8 4 2.3 4-2.3"/></svg></span>
+      <span>GaussRoom<small>空间重建</small></span>
+    </a>
+    <span id="connectionState" class="connection-state">未连接</span>
+  </header>
+  <div class="hero"><p class="eyebrow">记录空间的每一个视角</p><h1>从照片，到三维空间<span>。</span></h1><p>手机拍摄，电脑重建，随时打开你的空间。</p></div>
+  <nav class="stepper" aria-label="重建步骤"><span id="connectStep" class="step is-active"><b>1</b>连接</span><span id="photosStep" class="step"><b>2</b>照片</span><span id="rebuildStep" class="step"><b>3</b>重建</span></nav>
+  <p id="message" role="status" aria-live="polite"></p>
+  <section id="pairSection" class="card">
+    <div class="section-heading"><div><p class="eyebrow">开始使用</p><h2>连接你的电脑</h2></div><span class="section-icon">01</span></div>
+    <p class="section-description">在电脑工作台启用手机连接，输入显示的配对码。</p>
+    <form id="pairForm">
+      <label>配对码<input id="code" class="pair-code" required inputmode="numeric" autocomplete="one-time-code" placeholder="输入 6 位配对码"></label>
+      <label>设备名称<input id="device" required maxlength="100" value="手机浏览器"></label>
+      <button class="primary full">配对</button>
+    </form>
+    <p class="footnote">手机与电脑需连接同一局域网。</p>
+  </section>
+  <section id="createSection" class="card setup-card" hidden>
+    <details id="projectSetup" open>
+      <summary class="setup-summary"><span><span class="eyebrow">当前项目</span><strong id="setupSummary">新建或选择照片项目</strong></span><span class="summary-action">设置 <span class="chevron"></span></span></summary>
+      <div class="setup-body">
+        <form id="createForm">
+          <label>项目名称<input id="name" required maxlength="100" value="照片项目" placeholder="例如：我的客厅"></label>
+          <label>训练档位<select id="preset"><option value="standard">标准 · 推荐</option><option value="fast">快速</option><option value="full">完整</option></select></label>
+          <button class="primary full">创建批次</button>
+        </form>
+        <label class="saved-projects">继续已有项目<select id="sessions"><option value="">选择批次</option></select></label>
+      </div>
+    </details>
+    <div id="batchActions" class="batch-actions" hidden><span>管理当前照片与重建结果</span><button id="deleteBatch" class="danger-button" type="button">删除批次</button></div>
+  </section>
+  <section id="batchSection" class="card" hidden>
+    <div class="section-heading"><div><p class="eyebrow">照片采集</p><h2>添加空间照片 <span id="photoCount" class="count-badge">0</span></h2></div><span id="batchState" class="status-badge">待上传</span></div>
+    <p id="batchInfo" class="section-description"></p>
+    <div class="photo-stats" aria-label="照片统计"><div><strong id="validCount">0</strong><span>有效照片</span></div><div><strong id="attentionCount">0</strong><span>待处理</span></div><div><strong id="photoSize">0 KiB</strong><span>已占用</span></div></div>
+    <div class="capture-actions">
+      <label class="capture-button album-button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="m3 16 5-5 5 5 3-3 5 5M15 7h.01"/></svg><span>选择相册<small>支持批量添加</small></span><input id="gallery" type="file" accept=".jpg,.jpeg,.png" multiple></label>
+      <label class="capture-button camera-button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5 9.5 3h5L16 5h4v15H4V5h4Z"/><circle cx="12" cy="12" r="4"/></svg><span>拍照<small>使用系统相机</small></span><input id="camera" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" capture="environment"></label>
+    </div>
+    <details class="help"><summary>照片要求与拍摄提示</summary><p id="limits"></p><p id="formatNote"></p><p>如果不能打开相机，请先拍照，再从相册选择。原始照片不会被压缩。</p></details>
+    <div id="transferStatus" class="transfer-status" hidden><p id="uploadProgress" role="status" aria-live="polite"></p><progress id="uploadMeter" max="1" value="0" aria-label="当前照片上传进度"></progress></div>
+    <p id="reselect" class="attention-note"></p>
+    <details id="queuedDetails" class="queue-panel" hidden><summary id="queueSummary">待上传照片</summary><ul id="queued"></ul><button id="retryQueue" class="secondary full" hidden>继续上传待处理照片</button></details>
+    <div id="photoLibrary">
+      <div class="library-heading"><h3>照片预览</h3><button id="togglePhotos" class="text-button" type="button" aria-expanded="false">查看全部</button></div>
+      <div id="photoFilters" class="photo-filters" role="group" aria-label="照片筛选"><button type="button" data-filter="all" aria-pressed="true">全部</button><button type="button" data-filter="issues" aria-pressed="false">待处理</button><button type="button" data-filter="complete" aria-pressed="false">已完成</button></div>
+      <div id="emptyPhotos" class="empty-photos"><span>▧</span><p>还没有照片</p><small>从相册添加，或拍下第一个视角。</small></div>
+      <ul id="files" class="photo-list" aria-label="照片列表"></ul>
+      <div id="photoPager" class="photo-pager" hidden><button id="prevPhotos" class="secondary" type="button">上一页</button><span id="photoPage" aria-live="polite"></span><button id="nextPhotos" class="secondary" type="button">下一页</button></div>
+    </div>
+    <div class="card-footer"><button id="commit" class="primary full">提交照片并创建项目</button><p class="footnote">照片就绪后创建项目，再开始重建。</p></div>
+  </section>
+  <section id="projectSection" class="card" hidden>
+    <div class="section-heading"><div><p class="eyebrow">电脑增强</p><h2>重建与漫游</h2></div><span class="section-icon">03</span></div>
+    <p id="projectInfo" class="section-description"></p>
+    <div class="project-metrics"><p id="progress"></p><p id="timing"></p></div>
+    <progress id="projectMeter" max="1" value="0" aria-label="重建进度"></progress>
+    <p id="quality" class="quality-note"></p>
+    <ul id="steps" class="stages"></ul>
+    <div class="project-actions"><button id="run" class="primary">开始重建</button><a id="viewer" class="button secondary" hidden>打开模型 ↗</a></div>
+  </section>
+  <footer class="app-footer">GaussRoom <span>·</span> 让空间触手可及</footer>
+</main>
+<script type="module" src="/mobile/app.js"></script>
+<dialog id="deleteDialog" class="delete-dialog" aria-labelledby="deleteTitle" aria-describedby="deleteName deleteWarning">
+  <div class="delete-icon" aria-hidden="true">×</div><h2 id="deleteTitle">删除这个项目？</h2><strong id="deleteName"></strong>
+  <p id="deleteWarning">已上传照片和重建结果将一并删除，无法撤销。</p>
+  <div class="dialog-actions"><button id="cancelDelete" class="secondary" type="button" autofocus>取消</button><button id="confirmDelete" class="danger-solid" type="button">确认删除</button></div>
+</dialog>
+</body>
+</html>

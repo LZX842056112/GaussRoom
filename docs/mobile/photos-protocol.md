@@ -14,12 +14,13 @@
 - `GET /photo-sessions` -> 批次数组，只有当前设备的数据。
 - `POST /photo-sessions {name,trainingPreset}` -> 新批次；preset 缺省为 standard。
 - `GET /photo-sessions/:id` -> 当前批次。
+- `DELETE /photo-sessions/:id` -> `{removed,projectId}`。删除本设备批次及关联的普通照片项目、原件和重建结果；运行中的项目返回 409。仍要求 Bearer，Cookie 单独无权删除。网页操作前须确认不可撤销。
 - `POST /photo-sessions/:id/files {name,bytes}` -> `{fileId,session}`。服务器产生 fileId；name 仅为显示名称。
 - `PUT /photo-sessions/:id/files/:fileId` -> 二进制完整照片；字节数必须等于声明值。成功返回当前批次。失败重传当前文件，不拼接部分内容。
 - `DELETE /photo-sessions/:id/files/:fileId` -> 当前批次。仅可移除未提交批次的文件，原始手机照片保持不变。
 - `POST /photo-sessions/:id/commit` -> `{projectId}`。重复提交幂等。提交不启动训练。
 
-批次 DTO：`{id,name,trainingPreset,status,projectId,files,uniqueCount,totalBytes}`。status 为 `open | committing | committed`；projectId 未创建时为 null。
+批次 DTO：`{id,name,trainingPreset,status,projectId,files,uniqueCount,totalBytes}`。status 为 `open | committing | committed | deleting`；projectId 未创建时为 null。deleting 表示删除尚未完成，可重试 DELETE；该状态不再提供项目授权或重建入口。
 
 file DTO：`{id,name,bytes,status,error,sha256,width,height,duplicateOf}`。status 为 `pending | uploading | ready | duplicate | failed`；尚无值的字段为 null。重复文件以完整内容 SHA256 判定，标记 duplicate 并引用现有 ready 文件。uniqueCount 只统计 ready。totalBytes 是未移除文件的声明总字节数（含重复文件），用于容量预留。
 
@@ -41,7 +42,7 @@ file DTO：`{id,name,bytes,status,error,sha256,width,height,duplicateOf}`。stat
 `tools/workbench/lib/photo-sessions.mjs` 导出：
 
 ```js
-createPhotoSessions({root,projectStore,validatePhoto,getCapabilities,grantProject,isDeviceActive})
+createPhotoSessions({root,projectStore,jobStore,validatePhoto,getCapabilities,grantProject,revokeProject,isDeviceActive})
 ```
 
 返回 `{handle,capabilities,ownsProject}`。
@@ -52,6 +53,7 @@ createPhotoSessions({root,projectStore,validatePhoto,getCapabilities,grantProjec
 - `validatePhoto(path,extension)` -> Promise<PhotoInfo>。
 - `getCapabilities()` -> Promise<{photoFormats}>。服务补齐 limits 和 trainingPresets。
 - `grantProject(deviceId,projectId)` 同步将项目加入现有设备授权集合。
+- `revokeProject(deviceId,projectId)` 同步清理已删除项目的授权。`jobStore.current/liveProject` 用于阻止删除正在运行的项目。
 - `isDeviceActive(deviceId)` -> boolean；用于启动恢复，已撤销设备不得重新获得授权。
 
 PhotoInfo：`{format,extension,width,height,sha256,bytes}`。extension 是 `.jpg | .png | .heic | .heif`，format 为 `JPEG | PNG | HEIC | HEIF`。

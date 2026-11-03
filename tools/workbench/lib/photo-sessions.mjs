@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { createReadStream, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, existsSync, openSync, closeSync, fsyncSync, readSync, writeSync, copyFileSync, statfsSync } from 'node:fs';
+import { createReadStream, mkdirSync, readdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, existsSync, openSync, closeSync, fsyncSync, readSync, writeSync, copyFileSync, statfsSync } from 'node:fs';
 import { join, dirname, extname, resolve } from 'node:path';
 import { readJson, sendJson } from './http.mjs';
 
@@ -10,7 +10,7 @@ const defaults = { maxFileBytes: 67108864, maxFiles: 500, maxBatchBytes: 4294967
 const digest = async path => { const h = createHash('sha256'); for await (const b of createReadStream(path)) h.update(b); return h.digest('hex'); };
 const digestSync = path => { const h=createHash('sha256'), fd=openSync(path,'r'), b=Buffer.alloc(65536); try { let n; while((n=readSync(fd,b,0,b.length,null))>0) h.update(b.subarray(0,n)); } finally { closeSync(fd); } return h.digest('hex'); };
 
-export function createPhotoSessions({ root, projectStore, validatePhoto, getCapabilities, grantProject, isDeviceActive, limits = {} }) {
+export function createPhotoSessions({ root, projectStore, jobStore = {}, validatePhoto, getCapabilities, grantProject, revokeProject = ()=>{}, isDeviceActive, limits = {} }) {
   root = resolve(root); mkdirSync(root, { recursive: true });
   const lim = { ...defaults, ...limits }, locks = new Set(), sessions = new Map();
   const dir = id => join(root, id), meta = id => join(dir(id), 'session.json');
@@ -21,7 +21,7 @@ export function createPhotoSessions({ root, projectStore, validatePhoto, getCapa
   const own = (id, device) => { const s = uuid.test(id) && sessions.get(id); if (!s || s.deviceId !== device) throw bad('批次不存在',404); return s; };
   const cleanupReady = s => { try { rmSync(join(dir(s.id),'ready'),{recursive:true,force:true}); } catch {} };
   const file = (s,id) => { const f = s.files.find(x => x.id === id); if (!f) throw bad('文件不存在',404); return f; };
-  const space = n => { const d = statfsSync(root); if (d.bavail * d.bsize < n) throw bad('磁盘空间不足',413); };
+  const space = n => { mkdirSync(root,{recursive:true}); const d = statfsSync(root); if (d.bavail * d.bsize < n) throw bad('磁盘空间不足',413); };
   const recover = s => {
     if (s.status !== 'committing') return;
     let p; try { p = projectStore.read(s.projectId); } catch { s.status = 'open'; s.projectId = null; save(s); return; }
@@ -64,6 +64,30 @@ export function createPhotoSessions({ root, projectStore, validatePhoto, getCapa
     if (!action && method==='GET') { sendJson(res,200,dto(own(id,deviceId))); return true; }
     await exclusive(id,async()=>{
       const s=own(id,deviceId), check=()=>{checkAuthorization(); own(id,deviceId);};
+      if (!action && method==='DELETE') {
+        check();const folder=resolve(dir(s.id));if(!uuid.test(s.id)||dirname(folder)!==root)throw bad('批次路径无效',409);
+        let project=null,projectFolder=null;const retryDeletion=s.status==='deleting';
+        if(s.projectId){
+          if(!s.projectId.startsWith('mobile-')||!uuid.test(s.projectId.slice(7)))throw bad('项目关联无效',409);
+          projectFolder=dirname(projectStore.projectPath(s.projectId));
+          if(jobStore.current?.(s.projectId)||jobStore.liveProject?.(s.projectId))throw bad('项目正在重建，请等待完成或先在电脑停止任务。',409);
+          try{project=projectStore.read(s.projectId);}catch{if(existsSync(projectStore.projectPath(s.projectId))||(!retryDeletion&&existsSync(projectFolder)))throw bad('无法读取项目，请在电脑工作台检查。',409);}
+          if(project){
+            const belongs=project.photoSessionId===s.id||resolve(project.sourceDir??'')===resolve(folder,'ready');
+            if(project.id!==s.projectId||!belongs||project.inputKind==='arkit_scan'||project.capture)throw bad('项目不属于当前批次',409);
+            if(['running','aborting'].includes(project.state))throw bad('项目正在重建，请等待完成或先在电脑停止任务。',409);
+          }
+        }
+        s.status='deleting';save(s);check();
+        try{
+          if(project||(retryDeletion&&projectFolder&&existsSync(projectFolder)))projectStore.remove(s.projectId,{allowMissingMetadata:retryDeletion});
+          if(s.projectId)revokeProject(deviceId,s.projectId);
+          // Keep the deletion record until uploaded data has been removed.
+          for(const name of readdirSync(folder))if(!['session.json','session.json.tmp'].includes(name))rmSync(join(folder,name),{recursive:true,force:true});
+          rmSync(meta(s.id)+'.tmp',{force:true});rmSync(meta(s.id),{force:true});rmdirSync(folder);
+        }catch{throw bad('删除未完成，请检查电脑文件占用和写入权限后重试。',503);}
+        sessions.delete(s.id);sendJson(res,200,{removed:s.id,projectId:s.projectId});return;
+      }
       if (action==='files' && !fid && method==='POST') {
         const b=await readJson(req); check(); checkOpen(s);
         if (!b || typeof b.name!=='string' || !b.name.trim() || b.name.length>255 || !Number.isSafeInteger(b.bytes) || b.bytes<1 || Object.keys(b).some(k=>!['name','bytes'].includes(k))) throw bad('文件参数无效');

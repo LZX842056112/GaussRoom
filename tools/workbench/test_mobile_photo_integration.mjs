@@ -52,6 +52,14 @@ test('public phone page pairs and imports real photos into the existing ordinary
  assert.equal((await request(`/projects/${p.id}`)).status,404);
  assert.equal((await request(`/projects/${p.id}/run`,'POST',{trainingPreset:'standard'})).status,404);assert.equal(starts,1);
  token=firstToken;assert.equal((await request(`/projects/${p.id}`)).status,200);
+ assert.equal((await fetch(`${base}/photo-sessions/${session.id}`,{method:'DELETE',headers:{cookie}})).status,401);
+ const remove=store.remove;let failRemoval=true;store.remove=(id,options)=>{if(failRemoval){failRemoval=false;rmSync(projects.projectPath(id));throw Error('simulated locked output');}return remove(id,options);};
+ assert.equal((await request(`/photo-sessions/${session.id}`,'DELETE')).status,503);assert.equal(existsSync(p.sourceDir),true);
+ await gateway.disable();gateway=createMobileGateway({stateRoot:join(root,'state'),projectStore:store,jobStore:jobs});info=await gateway.enable({port:0,host:'127.0.0.1'});origin=`http://127.0.0.1:${info.port}`;base=origin+'/api/mobile/v1';
+ assert.equal((await request(`/photo-sessions/${session.id}`,'DELETE')).status,200);
+ assert.equal(existsSync(dirname(projects.projectPath(p.id))),false);
+ assert.equal((await request(`/projects/${p.id}`)).status,404);assert.deepEqual(await (await request('/photo-sessions')).json(),[]);
+ const saved=JSON.parse(readFileSync(join(root,'state','state.json'),'utf8'));assert.equal(Object.values(saved.devices).some(d=>d.projects.includes(p.id)),false);
 });
 
 test('revocation while photo declarations await input or capabilities prevents new records',async t=>{

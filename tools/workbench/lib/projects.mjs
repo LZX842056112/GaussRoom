@@ -399,9 +399,10 @@ export function createComponent(id, { model: modelName, component: componentInde
   }
 }
 
-export function remove(id) {
-  const project = read(id);
-  const folder = resolve(PROJECTS_DIR, project.id);
+export function remove(id, { allowMissingMetadata = false } = {}) {
+  const metadata = projectPath(id); // Validate the requested ID before resolving a deletion path.
+  if (!allowMissingMetadata || existsSync(metadata)) read(id);
+  const folder = resolve(PROJECTS_DIR, id);
   try {
     rmSync(folder, { recursive: true, force: true });
   } catch (error) {

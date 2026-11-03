@@ -9,3 +9,11 @@ export function timingLabel(timing, now = Date.now()) {
 }
 export const uploadLabel = (progress, files, queued = 0) => `上传中：${formatBytes(progress.loaded)} / ${formatBytes(progress.total)} · 已完成 ${files.filter(f=>['ready','duplicate'].includes(f.status)).length} / ${files.length + queued} 张`;
 export const shouldPoll = (project, generation, currentGeneration) => generation === currentGeneration && ['running','aborting'].includes(project?.state);
+
+export function photoView(files,{filter='all',expanded=false,page=0,activeId=null}={}) {
+ const selected=files.filter(f=>filter==='issues'?unfinished(f):filter==='complete'?['ready','duplicate'].includes(f.status):true);
+ const count=selected.length,pages=Math.max(1,Math.ceil(count/12));
+ const current=expanded?Math.min(Math.max(0,Number.isInteger(page)?page:0),pages-1):0;
+ const ordered=expanded?selected:[...selected.filter(f=>f.id===activeId),...selected.filter(f=>f.id!==activeId&&unfinished(f)),...selected.filter(f=>f.id!==activeId&&!unfinished(f))];
+ return {items:ordered.slice(expanded?current*12:0,expanded?(current+1)*12:6),count,pages,page:current};
+}
