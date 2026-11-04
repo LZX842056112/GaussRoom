@@ -77,10 +77,11 @@ test('pausing while camera permission is pending invalidates the opening request
  const source=await readFile(new URL('./public/mobile/app.js',import.meta.url),'utf8');
  const pause=source.slice(source.indexOf('function pauseCapture('),source.indexOf('\nasync function startCapture()'));
  const controls=new Map();let stopped=0;
- const context=vm.createContext({$:id=>{if(!controls.has(id))controls.set(id,{});return controls.get(id);},render(){},releaseWakeLock(){}});
+ const context=vm.createContext({$:id=>{if(!controls.has(id))controls.set(id,{});return controls.get(id);},render(){},releaseWakeLock(){},directionGuidance:{stop(){stopped++;}}});
  vm.runInContext(`let cameraGeneration=4,openingCamera=true,stream=null;const captureLoop={pause(){},stop(){}};${pause}`,context);
  vm.runInContext('pauseCapture()',context);
  assert.equal(vm.runInContext('openingCamera',context),false);assert.equal(vm.runInContext('cameraGeneration',context),5);
+ assert.equal(stopped,1);
 });
 
 test('batch transition waits for capture storage and cancels analysis only after checking local Blobs',async()=>{

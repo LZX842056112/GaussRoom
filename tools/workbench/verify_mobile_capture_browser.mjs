@@ -11,6 +11,22 @@ export async function startCaptureFixture(){
  const json=(response,value,status=200)=>{response.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});response.end(JSON.stringify(value));};
  const fixtureScript=`<script>
  localStorage.setItem('gr.mobile.token','fixture-token');localStorage.setItem('gr.mobile.device','device');localStorage.setItem('gr.mobile.batch','b');
+ const direction={yaw:0,pitch:0,permission:'granted',paused:false};
+ class FixtureOrientation extends Event {
+   static async requestPermission(){return direction.permission;}
+   constructor(){super('deviceorientation');this.alpha=-direction.yaw;this.beta=90+direction.pitch;this.gamma=0;}
+ }
+ Object.defineProperty(window,'DeviceOrientationEvent',{value:FixtureOrientation,configurable:true});
+ const sensorTimer=setInterval(()=>{if(!direction.paused)window.dispatchEvent(new FixtureOrientation());},200);
+ window.addEventListener('pagehide',()=>clearInterval(sensorTimer),{once:true});
+ const tools=document.createElement('aside');tools.style.cssText='padding:12px;background:#fff4d9;border:1px solid #e6c77d;font:13px sans-serif';
+ tools.textContent='隔离测试：画布相机与模拟方向，不访问真实传感器。';
+ for(const [text,action]of [
+  ['向右15°',()=>direction.yaw+=15],['向左15°',()=>direction.yaw-=15],
+  ['向上35°',()=>direction.pitch=35],['回到平视',()=>direction.pitch=0],['向下35°',()=>direction.pitch=-35],
+  ['中断方向数据',()=>direction.paused=!direction.paused],['拒绝／允许权限',()=>direction.permission=direction.permission==='granted'?'denied':'granted']
+ ]){const button=document.createElement('button');button.textContent=text;button.onclick=()=>{action();output.textContent=JSON.stringify(direction);};tools.append(button);}
+ const output=document.createElement('pre');tools.append(output);document.body.prepend(tools);
  navigator.mediaDevices.getUserMedia=async function(constraints){
    const canvas=document.createElement('canvas');canvas.width=1920;canvas.height=1080;const ctx=canvas.getContext('2d');
    for(let y=0;y<1080;y+=40)for(let x=0;x<1920;x+=40){ctx.fillStyle=(x/40+y/40)%2?'#7483be':'#c1b275';ctx.fillRect(x,y,40,40);}

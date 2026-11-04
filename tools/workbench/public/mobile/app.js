@@ -1,5 +1,6 @@
 import {canCommit, needsReselect, unfinished, formatBytes, timingLabel, uploadLabel, shouldPoll, photoView} from './state.mjs';
 import {captureDecision,frameMetrics,CaptureLoop,CaptureStore,uploadPending,canStoreCapture} from './capture.mjs';
+import {createCaptureGuidance} from './capture-guidance.mjs';
 const $ = id => document.getElementById(id), base='/api/mobile/v1';
 const handoffParams=new URLSearchParams(location.hash.slice(1)),handoffTicket=handoffParams.get('handoff');
 if(handoffParams.has('handoff'))history.replaceState(null,'',location.pathname+location.search);
@@ -10,6 +11,7 @@ let deviceId=localStorage.getItem('gr.mobile.device')||'',pendingCaptures=[],sto
 let analysisTimer=null,analysisGeneration=0,analysisWanted=false,mapPanel=null,mapRevision=null,mapThumbUrl=null,mapThumbGeneration=0,connection=null;
 let recoveryTargetId=localStorage.getItem('gr.mobile.recoveryTarget')||'';
 const captureLoop=new CaptureLoop(captureFrame,{onError:e=>{pauseCapture(e.message);},onSettled:()=>render()});
+const directionGuidance=createCaptureGuidance({host:window,document,$,getContext:()=>({active:!!stream,hidden:document.hidden,opening:openingCamera,inFlight:captureLoop.inFlight,frontCamera:stream?.getVideoTracks()[0]?.getSettings?.().facingMode==='user',files:batch?.files??[],pending:currentPending()})});
 const labels={open:'待上传',committing:'正在创建',committed:'已创建',pending:'待处理',uploading:'上传中',ready:'已上传',duplicate:'重复照片',failed:'失败',idle:'待开始',running:'重建中',aborting:'正在停止',completed:'已完成',done:'已完成',needs_input:'待补充',passed:'通过',pass:'通过',unmeasured:'未实测',unknown:'待检查',not_run:'待检查',unverified:'待验证',verified:'已验证',unreviewed:'待检查',reviewed:'已检查',missing:'有缺失',needs_improvement:'待改进',calibrated:'已标定',skipped:'已跳过',cancelled:'已停止',canceled:'已停止'};
 labels.deleting='删除未完成';
 const statusLabel=value=>labels[value]||value||'待检查';
@@ -139,6 +141,7 @@ function renderCapture(){
  $('fitCaptureMap').disabled=!mapPanel;
  $('secureSection').hidden=isSecureContext;
  $('secureHandoff').disabled=blocked||!token||!connection?.httpsEnabled||pendingCaptures.length>0||queue.length>0;
+ directionGuidance.render();
 }
 async function refreshPending(){pendingCaptures=await captureStore.list();storageReady=true;render();}
 async function releaseWakeLock(){const lock=wakeLock;wakeLock=null;try{await lock?.release();}catch{}}
@@ -146,6 +149,7 @@ async function requestWakeLock(){if(!navigator.wakeLock||document.hidden)return;
 function pauseCapture(reason='已暂停。点“继续采集”后恢复。'){if(openingCamera)stopCapture(reason);captureLoop.pause();releaseWakeLock();$('captureReason').textContent=reason;render();}
 function stopCapture(reason='相机已停止。'){
  cameraGeneration++;openingCamera=false;captureLoop.stop();const old=stream;stream=null;if(old)for(const track of old.getTracks())track.stop();$('captureVideo').srcObject=null;$('captureVideo').hidden=true;releaseWakeLock();$('captureReason').textContent=reason;
+ directionGuidance.stop();
 }
 async function startCapture(){
  if(openingCamera||captureLoop.state==='running'||!token||batch?.status!=='open')return;
@@ -179,8 +183,10 @@ async function captureFrame(manual,stillCurrent){
  const context=sample.getContext('2d',{willReadFrequently:true});context.drawImage(video,0,0,sample.width,sample.height);
  const metrics=frameMetrics(context.getImageData(0,0,sample.width,sample.height).data,sample.width,sample.height,Math.max(width,height));
  const decision=captureDecision(metrics,captureHistory,manual);
+ directionGuidance.feedback(decision.reason);
  const reasons={resolution:'已跳过：分辨率不足。',dark:'已跳过：画面过暗。请增加照明。',bright:'已跳过：画面过亮。请避开强光。',blur:'已跳过：画面模糊。请减慢移动速度。',repeat:'已跳过：画面与最近照片近乎相同。请移动或改变朝向。',uncertain:'已保存。画面纹理不足，不能可靠判断重复。',accepted:manual?'手动补拍已保存。':'照片已保存。'};
  if(!decision.accept){skippedCaptures++;$('captureReason').textContent=reasons[decision.reason];if(decision.reason==='resolution')pauseCapture(reasons.resolution);render();return;}
+ const directionShot=directionGuidance.snapshot();
  const canvas=document.createElement('canvas');canvas.width=width;canvas.height=height;canvas.getContext('2d').drawImage(video,0,0,width,height);
  const blob=await new Promise((resolve,reject)=>canvas.toBlob(value=>value?resolve(value):reject(new Error('照片编码失败。请重试。')),'image/jpeg',.94));
  if(!stillCurrent()||document.hidden||batch?.id!==target||deviceId!==owner||!token)return;
@@ -188,7 +194,7 @@ async function captureFrame(manual,stillCurrent){
  const id=crypto.randomUUID(),createdAt=Date.now();
  await captureStore.put({id,batchId:target,owner,name:`capture-${createdAt}-${id.slice(0,8)}.jpg`,bytes:blob.size,blob,createdAt,width,height});
  captureHistory.push(metrics);if(captureHistory.length>16)captureHistory.shift();acceptedCaptures++;$('captureReason').textContent=reasons[decision.reason];
- await refreshPending();if(!canStoreCapture(pendingCaptures,1))pauseCapture('本地队列已满。照片已保存。请等待上传，再点“继续采集”。');
+ await refreshPending();directionGuidance.saved(directionShot,id);if(!canStoreCapture(pendingCaptures,1))pauseCapture('本地队列已满。照片已保存。请等待上传，再点“继续采集”。');
  pumpCaptures();render();
 }
 function stopCaptureUploads(){captureUploadGeneration++;clearTimeout(captureUploadTimer);captureUploadTimer=null;captureUploadAbort?.abort();captureUploadAbort=null;}
@@ -293,7 +299,7 @@ $('commit').onclick=()=>action(async()=>{await prepareBatchChange();let result;t
 $('run').onclick=()=>action(async()=>{try{await api(`/projects/${project.id}/run`,{method:'POST',json:{trainingPreset:batch.trainingPreset}});say('已开始重建。');}catch(e){if(e.status===409)say('工作台正忙或当前项目不能启动。请稍后再试。');else throw e;}await loadProject();});
 window.addEventListener('pagehide',()=>{stopPoll();stopCapture('页面已离开。请手动重新启动相机。');stopCaptureUploads();stopAnalysisPolling();});
 window.addEventListener('pageshow',event=>{if(event.persisted&&token){if(batch?.projectId)loadProject();startAnalysisPolling();pumpCaptures();render();}});
-document.addEventListener('visibilitychange',()=>{if(document.hidden){if(stream||openingCamera)pauseCapture('页面进入后台，已暂停。回到前台后，请点“继续采集”。');releaseWakeLock();}else{render();pumpCaptures();}});
+document.addEventListener('visibilitychange',()=>{if(document.hidden){directionGuidance.stop();if(stream||openingCamera)pauseCapture('页面进入后台，已暂停。回到前台后，请点“继续采集”。');releaseWakeLock();}else{render();pumpCaptures();}});
 window.addEventListener('online',()=>{loadConnection();pumpCaptures();});
 async function bootstrap(){
  try{await refreshPending();}catch(e){storageReady=false;$('captureReason').textContent=`本地存储不可用：${e.message}。请使用系统相机或相册。`;}

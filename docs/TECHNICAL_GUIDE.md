@@ -327,6 +327,16 @@ flowchart LR
 
 采集流程参考 [Polycam Object Mode](https://learn.poly.cam/hc/en-us/articles/27425185907348-How-to-Use-Object-Mode) 的自动与手动拍摄、照片检查，以及 [RealityScan 移动指南](https://dev.epicgames.com/documentation/realityscan-mobile/realityscan-step-by-step-guide) 的移动拍摄、重叠和分批位置分析。本项目使用网页相机与电脑分析，不复用其原生 AR 定位能力。
 
+### 12.4 取景中的方向点为何需要站位
+
+方向引导参考 [Aholo 物体采集指南](https://aholo.featurebase.app/en/help/articles/8418706-object-capture-guide) 的方向点提示，以及 [室内采集指南](https://aholo.featurebase.app/en/help/articles/7830674-indoor-space-capture-guide) 的墙面、天花边缘、门窗和多视角拍摄。手机网页把未记录方向画为空心点，把已有保存照片的方向画为绿色点。箭头引导用户转动、抬高或压低镜头。门口模式提示从两个房间保留共同内容。
+
+示例双房间项目中，用户先在客厅当前站位环视。每张照片成功写入本机后，程序才点亮相应朝向。用户走到门口后点击“新站位／门口”，再分别面向两个房间拍摄。用户仍须绕到沙发后面检查遮挡。方向传感器只能说明镜头朝向，不能判断手机平移距离，也不能判断相同方向是否换成了另一面墙。
+
+方向点采用本次站位的相对坐标，不依赖磁北。屏幕旋转需要同时修正画面右和上，否则横屏的箭头会错位。方向样本和照片在采集时关联，照片编码或本机保存失败时不记点。数据过旧、转动过快、权限拒绝时保留文字提示，避免凭空显示已完成方向。停止相机或切后台后重新建立参考，照片继续保留。
+
+这个点阵是拍摄方向示意。浏览器没有准确镜头内参，点的位置使用近似视场，因此不能把它解释为贴在墙上的 AR 标记。72 个方向点全部记录也不证明表面拍全，更不证明几何门禁通过。完整参数见[代码设计](CODE_DESIGN.md#direction-guidance)。
+
 ## 13. LiDAR 原生链路
 
 ### 13.1 有界采集和持久化

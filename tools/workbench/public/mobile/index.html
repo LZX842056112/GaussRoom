@@ -56,7 +56,17 @@
     <div class="photo-stats" aria-label="照片统计"><div><strong id="validCount">0</strong><span>有效照片</span></div><div><strong id="attentionCount">0</strong><span>待处理</span></div><div><strong id="photoSize">0 KiB</strong><span>已占用</span></div></div>
     <div class="auto-capture">
       <div class="library-heading"><h3>自动采集</h3><span id="captureState" class="status-badge">未启动</span></div>
-      <video id="captureVideo" autoplay muted playsinline aria-label="后置相机预览" hidden></video>
+      <div id="cameraViewport" class="camera-viewport" hidden>
+        <video id="captureVideo" autoplay muted playsinline aria-label="后置相机预览" hidden></video>
+        <svg id="directionOverlay" class="direction-overlay" viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-hidden="true" hidden></svg>
+        <div id="directionHud" class="direction-hud" hidden><span id="directionBadge" class="direction-badge">拍摄提示</span><span class="direction-reticle" aria-hidden="true">＋</span><div class="direction-prompt"><span id="directionArrow" aria-hidden="true">◎</span><span id="directionCue"></span></div></div>
+      </div>
+      <div class="direction-controls" aria-label="拍摄方向引导">
+        <div class="auto-controls"><button id="directionEnable" type="button" class="secondary" aria-pressed="false">启用方向引导</button><button id="directionNewStation" type="button" class="secondary" disabled>新站位／门口</button></div>
+        <label>补拍部位<select id="directionMode"><option value="auto">自动选择待拍方向</option><option value="wall">墙面环视</option><option value="upper">上方／天花边缘</option><option value="lower">下方／家具下沿</option><option value="doorway">门口连接</option></select></label>
+        <p id="directionStatus" class="footnote" role="status"></p><p id="directionSummary" class="footnote"></p>
+        <details class="help"><summary>方向点如何使用</summary><p>站稳后启用方向引导。跟随箭头，把空心点移到准星附近。照片成功保存在本机后，对应方向点变绿。移动到新位置或门口后，点“新站位／门口”。请绕过家具，补拍被遮挡的部分。</p><p>点阵只示意当前站位的拍摄方向，不贴合墙面，也不测量覆盖率。镜头视野按近似值绘制。停止相机、进入后台或刷新会重置方向记录，照片不受影响。没有方向权限时，按文字提示继续拍摄。</p></details>
+      </div>
       <p id="captureResolution" class="footnote">使用后置相机。请求 1920 × 1080 或更高分辨率。</p>
       <p class="footnote">照片取自视频帧，保存为 JPEG（质量 94%）。保留完整画面。分辨率通常低于系统相机原图。</p>
       <label>检查间隔<select id="captureInterval"><option value="1000">1 秒</option><option value="1500" selected>1.5 秒</option><option value="2000">2 秒</option></select></label>
