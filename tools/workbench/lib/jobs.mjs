@@ -1,5 +1,6 @@
 // Single-job step machine: spawns one child at a time, streams real logs over SSE.
 import { spawn } from "node:child_process";
+import {acquireCompute,computeOwner} from './compute-slot.mjs';
 import { EventEmitter } from "node:events";
 import {
   appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, readFileSync, rmSync, statSync, writeFileSync,
@@ -54,7 +55,7 @@ export function busyId() {
 }
 
 export function anyRunning() {
-  return active.size > 0;
+  return active.size > 0 || computeOwner() !== null;
 }
 
 /**
@@ -584,7 +585,7 @@ async function run(job, project, options) {
 }
 
 export function start(projectId, options = {}, runtime = {}) {
-  if (active.size) {
+  if (active.size || computeOwner()) {
     throw Object.assign(new Error("已有作业在运行，请先等待完成或中止"), { code: 409 });
   }
   const project = projects.read(projectId);
@@ -624,6 +625,8 @@ export function start(projectId, options = {}, runtime = {}) {
     logTail: [],
     logTailSize: 0,
   };
+  const releaseCompute=acquireCompute({kind:'reconstruction',id:projectId});
+  if(!releaseCompute)throw Object.assign(new Error('电脑正在分析拍摄位置，请停止分析或等待完成。'),{code:409});
   active.set(projectId, job);
   job.done=run(job, project, options)
     .catch((error) => {
@@ -649,7 +652,7 @@ export function start(projectId, options = {}, runtime = {}) {
         console.error(`[workbench] 标记作业失败时出错（${projectId}）：${secondary.message}`);
       }
     })
-    .finally(() => active.delete(projectId));
+    .finally(() => {active.delete(projectId);releaseCompute();});
   return job;
 }
 

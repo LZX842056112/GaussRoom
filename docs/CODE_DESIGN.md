@@ -1,6 +1,6 @@
 # GaussRoom 代码设计
 
-本文档描述提交 `52f94dc` 的实现。核对日期为 2026-11-04。它是接口、状态和扫描格式的主要参考。操作流程见 [README](../README.md)，算法导读见[技术讲解](TECHNICAL_GUIDE.md)。
+本文档描述当前实现，包含本轮手机网页自动采集。核对日期为 2026-11-04。它是接口、状态和扫描格式的主要参考。操作流程见 [README](../README.md)，算法导读见[技术讲解](TECHNICAL_GUIDE.md)。
 
 ## 1. 系统结构与职责
 
@@ -50,7 +50,7 @@ COLMAP 命令行程序负责特征与匹配，以及普通照片位姿恢复。p
 
 [public](../tools/workbench/public) 中的 `app.js` 管理桌面项目和作业。`assistance.js`、`annotation.js` 和 `quality-review.js` 分别处理辅助流程、像素标记与画面检查。`viewer.html` 使用仓库内的 Three.js 与 Spark 模块加载 PLY。
 
-[public/mobile](../tools/workbench/public/mobile) 是原生 HTML、CSS 和 JavaScript 手机页面。`state.mjs` 提供提交条件、分页和状态计算。浏览器保存配对信息、批次及待选文件摘要；服务器保存已上传文件。
+[public/mobile](../tools/workbench/public/mobile) 是原生 HTML、CSS 和 JavaScript 手机页面。`state.mjs` 提供提交条件、分页和状态计算。`capture.mjs` 处理画质检查、定时循环、IndexedDB 与串行恢复上传。`capture-map.mjs` 按版本显示相机和稀疏点。浏览器保存配对信息、批次及待选文件摘要；页面内采集另保存待传 Blob。服务器保存已上传文件。
 
 [apps/ios/GaussRoom](../apps/ios/GaussRoom) 使用 SwiftUI 组织页面，RealityKit 显示采集网格，SceneKit 显示离线模型，WKWebView 显示在线高斯场景。`ScanCapture.swift` 采集，`Core.swift` 提供几何与编辑结构，`OBJExporter.swift` 生成纹理模型，`ScanArchive.swift` 打包，`MobileClient.swift` 连接电脑。
 
@@ -109,12 +109,19 @@ projects/
         logs/<step-id>.log
   .mobile/
     state.json
+    certificates/current.json       # 私有 CA 与服务器密钥包；不提供下载
     uploads/<upload-id>.json
     uploads/<upload-id>.part
     photos/<session-id>/
       session.json
       <file-id>.part
       ready/<file-id>.<extension>
+      thumbnails/<file-id>.jpg
+      analysis/
+        status.json                 # 独立分析状态；不属于重建尝试
+        map.json                    # 最近成功的位置图
+        inputs/                     # 私有输入快照
+        work/                       # 工作图、特征数据库、匹配缓存及模型
 ```
 
 早期项目直接把 `images`、`sfm`、`summary`、`undistorted`、`train` 和 `logs` 放在项目根目录。`artifactDirs` 根据尝试 ID 选择旧布局或新布局。不要把项目根目录等同于当前工作目录。
@@ -213,7 +220,7 @@ LiDAR 摘要的 `scaleSource:"lidar"` 表示坐标来源。它不同于质量字
 
 桌面默认 `http://127.0.0.1:8123`；端口来自环境、命令行或默认值，冲突时顺延。桌面 API 没有账号系统，仅供本机使用。手机连接管理接口另检查 Host、Origin 和跨站请求标记。
 
-手机网关默认关闭，启用后监听 `0.0.0.0:8124`，只接收实现中允许的私有网络来源。网关不代理全部桌面路由，不提供任意本机文件访问。默认 HTTP 没有传输加密。
+手机网关默认关闭。HTTP 启用后监听 `0.0.0.0:8124`；HTTPS 启用后另监听 `0.0.0.0:8125`。它只接收实现中允许的私有网络来源。网关不代理全部桌面路由，不提供任意本机文件访问。HTTP 没有传输加密，连续采集使用可信 HTTPS。
 
 手机除配对和公开页面资源外需要 `Authorization: Bearer <device-token>`。令牌在电脑按 SHA256 保存。`POST /api/mobile/v1/session` 可为查看器设置 HttpOnly、SameSite=Strict Cookie；Cookie 仅授权 GET/HEAD，写操作仍须 Bearer。令牌不放在 URL。
 
@@ -298,6 +305,7 @@ JSON 请求使用 `Content-Type: application/json`。通用 JSON 请求上限为
 
 - `GET /api/mobile/status`：返回启用状态、端口、局域网地址、有效配对码、过期时间和设备列表。
 - `POST /api/mobile/enable`：启动网关并生成配对码；已启用时直接返回当前状态。
+- `POST /api/mobile/https/enable`：需要时启动 HTTP，再签发或更新证书并监听 HTTPS。返回扩展状态 `httpsEnabled`、`httpsPort`、`certificate`、`httpsError`。证书准备失败返回 503；HTTP 入口仍可使用。
 - `POST /api/mobile/disable`：关闭网关。
 - `POST /api/mobile/revoke`：请求 `{deviceId}`，撤销设备令牌。
 - `POST /api/mobile/import`：请求 `{path}`，从本机 `.gaussroom.zip` 导入；返回 `{projectId}`。
@@ -310,7 +318,7 @@ JSON 请求使用 `Content-Type: application/json`。通用 JSON 请求上限为
 
 - `POST /pair`：请求 `{code,deviceName}`，返回 `{token,deviceId}`。名称最多 100 字符；配对码有效期 5 分钟，成功后消费。每来源每分钟最多接纳 8 次配对尝试。需要新码时在电脑关闭再启用连接。
 - `POST /session`：Bearer 验证后建立只读 Cookie，返回 `{ok:true}`。
-- `GET /capabilities`：返回 `photoFormats`、`limits` 和 `trainingPresets`，手机以此配置选图入口与限制。
+- `GET /capabilities`：返回 `photoFormats`、`limits`、`trainingPresets` 和当前 `deviceId`，手机以此配置选图入口、限制和本地采集归属。
 - `GET /projects/:id`：返回删减摘要 `{id,name,state,steps,progress,timing,quality,lastError,scene}`。错误详情由电脑日志查看，响应不含主机路径。
 - `POST /projects/:id/run`：请求仅含 `{trainingPreset:"standard"}` 等有效档位。202 返回 `{jobId}`；忙碌或前置检查冲突返回 409。
 - `GET /projects/:id/scene.ply`：读取已授权项目的当前高斯导出，没有导出时返回 404。
@@ -325,13 +333,13 @@ JSON 请求使用 `Content-Type: application/json`。通用 JSON 请求上限为
 - `POST`：请求 `{name,trainingPreset?}`，返回新批次 DTO。名称最多 200 字符，档位默认 `standard`。
 - `GET`：返回当前设备的批次 DTO 数组。
 - `GET /:id`：返回一个批次 DTO。
-- `POST /:id/files`：请求 `{name,bytes}`，预留条目，返回 `{fileId,session}`。名称最多 255 字符。
+- `POST /:id/files`：请求 `{name,bytes,clientCaptureId?}`，预留条目，返回 `{fileId,session}`。名称最多 255 字符；采集 ID 必须为 UUID。同一批次重复 ID 且名称、长度相同，返回原条目；参数冲突返回 409。幂等查询先于容量预留检查。
 - `PUT /:id/files/:fileId`：发送该文件的完整原始二进制内容；长度须等于预留值。成功返回批次 DTO。
 - `DELETE /:id/files/:fileId`：仅开放批次可移除条目，返回更新后的批次 DTO。
 - `POST /:id/commit`：校验所有有效文件并创建项目，返回 `{projectId}`。重复提交返回同一 ID。
 - `DELETE /:id`：删除批次及其关联普通照片项目，返回 `{removed:<sessionId>,projectId}`。资源已删除后再次请求可返回 404，前端按已不存在处理。
 
-DTO 包含 `id`、`name`、`trainingPreset`、`status`、`projectId`、`files`、`uniqueCount` 和 `totalBytes`。文件条目包含 `id`、`name`、`bytes`、`status`、`error`、`sha256`、`width`、`height` 和 `duplicateOf`。
+DTO 包含 `id`、`name`、`trainingPreset`、`status`、`projectId`、`files`、`uniqueCount` 和 `totalBytes`。文件条目包含 `id`、`name`、`bytes`、`status`、`error`、`sha256`、`width`、`height`、`duplicateOf` 和可选 `clientCaptureId`。
 
 默认限制：`maxFileBytes=67108864`、`maxFiles=500`、`maxBatchBytes=4294967296`、`minLongEdge=1000`。图片校验还限制像素数不超过 100,000,000。扩展名与实际编码必须匹配；`.jpeg` 保存时规范为 `.jpg`。HEIC/HEIF 通过已配置 ffmpeg 和真实夹具探测后开放，探测结果缓存 60 秒。
 
@@ -341,7 +349,48 @@ DTO 包含 `id`、`name`、`trainingPreset`、`status`、`projectId`、`files`�
 
 删除前检查有效所有者、UUID 路径、照片批次与项目的实际关联，以及活动作业。关联 LiDAR 项目或无关项目时拒绝。清理前写入 `deleting`，保留元数据直到数据删除完成。即使项目元数据已删而输出目录仍残留，重试仍会清理。失败返回 503，不暴露电脑路径。
 
-### 7.3 完整扫描包上传
+<a id="capture-api"></a>
+### 7.3 自动采集与位置分析
+
+`getUserMedia` 请求后置相机，理想宽高为 1920×1080。实际尺寸来自 `videoWidth`、`videoHeight`。Canvas 使用完整尺寸，不按取景框裁切；JPEG 质量参数为 0.94。长边不足 1,000 像素时拒绝自动模式。定时器在上一轮完成后重新排程，不并发拍摄，也不补发错过的快门。间隔为 1、1.5、2 秒，默认 1.5 秒。
+
+低分辨率画面计算亮度、明暗像素比例、灰度方差、拉普拉斯方差、dHash 与灰度差。阈值只用于明显异常及高度相似的有纹理画面。弱纹理不证明重复位置。手动补拍绕过相似检查，保留其他检查。算法没有手机实时空间位姿，不声称识别全部重复物理位置。
+
+IndexedDB 数据库 `gaussroom-captures` 保存采集 UUID、设备、批次、名称、字节数、时间与 Blob。写事务同时检查 20 张和 128 MiB 上限。Blob 持久化成功后才登记和上传。恢复时先按 `clientCaptureId` 查询服务器；已为 `ready` 或 `duplicate` 时释放 Blob，否则复用原文件 ID 重传。401 立即停止相机和上传，保留 Blob。新的设备只能显式把本地照片分配给自己的新批次，不能获得旧设备的服务器数据。HTTP 与 HTTPS 的 IndexedDB、localStorage 不共享。
+
+接口前缀为 `/api/mobile/v1/photo-sessions/:id`。所有接口须通过当前设备授权及批次归属检查：
+
+- `POST /capture-analysis`：请求 `{action:"start",force?:boolean}`，202 返回分析状态。首轮至少 20 项有效照片；之后默认至少新增 12 项且间隔不少于 15 秒。`force` 只放宽后续新增张数，不放宽首轮或时间限制。运行中以最新请求合并待处理快照。`{action:"cancel"}` 等待退出，200 返回状态；仅开放批次可开始分析，已提交批次仍可停止分析。
+- `GET /capture-analysis`：200 返回 `{status,revision,lastMapRevision,processedCount,requestedCount,updatedAt,error}`。状态为 `idle|waiting|running|ready|failed|cancelled`。`updatedAt` 是 Unix 毫秒；错误不含主机路径。状态读取不申请新的分析。
+- `GET /capture-map`：200 返回最近成功地图；尚无地图返回 404。失败或超时不清除上一版有效地图。
+- `GET /files/:fileId/thumbnail`：200 返回最长边 256 像素的 JPEG，应用照片方向。只允许有效上传项；提交后从已验证关联项目副本读取。生成完成后再次检查授权、输入版本和文件身份。404 表示照片不可见或尚未就绪，503 表示生成失败。
+
+地图包含 `revision`、`updatedAt`、`scale:"unmeasured"`、`coordinateSystem`、`cameras`、`points`、`unlocalized`、`processedFileIds` 和 `suspectedDuplicates`。坐标约定为 `{up:"y",cameraForward:"-z",matrixOrder:"column-major",units:"arbitrary"}`。每个相机为 `{fileId,cameraToWorld:[16个数],intrinsics:[fx,fy,cx,cy],width,height}`。矩阵把相机局部坐标变到地图世界坐标；相机局部右为 +X、上为 +Y、前为 -Z。内参对应分析工作图像素。点为 `{position:[x,y,z],color:[r,g,b]}`，颜色为 0～255。未定位列表使用服务器文件 ID，不补造坐标。
+
+`capture_analysis.py` 先按真实文件 ID 建立工作图片名。工作图长边最多 1600，SIFT 最多 4096 特征。缓存已处理图片、数据库特征及匹配对。每张新图选择前面最多 10 张时序照片，以及更早历史中最多 5 张 dHash 相似照片。COLMAP `matches_importer --match_type pairs` 仍执行真实匹配和几何验证；相似指纹不直接生成三维点。随后运行增量 mapper。只导出最大的真实轨迹连通区域和最多 10,000 个点。COLMAP `image_id` 可以不连续，必须按数据库中的图片名称映射文件 ID。
+
+COLMAP 的相机前为 +Z、下为 +Y。设 `C=diag(1,-1,-1,1)`，其世界到相机矩阵为 `Tcw`，地图使用 `C × inverse(Tcw) × C`，并按列主序展开。三维点使用 `C` 转换。模型单位没有米制标定。相近相机位置及朝向仅产生疑似重复提示，已保存输入不自动删除。
+
+[capture-analysis.mjs](../tools/workbench/lib/capture-analysis.mjs) 管理独立快照、缓存、状态和 120 秒上限。[compute-slot.mjs](../tools/workbench/lib/compute-slot.mjs) 在位置分析和正式重建之间提供单个计算租约。正式作业仍在 `jobs.mjs` 管理；分析不写项目步骤、尝试、质量或重建计时。等待期间轮询计算槽，正式重建不自动排队。
+
+每轮固定输入范围。追加输入不使该轮失效，可先发布已处理子集。删除输入、撤销、删除批次及提交会增加输入代次并取消任务；等待进程退出后才继续操作。发布前检查设备、批次开放状态和代次，拒绝旧结果。删除输入同时清除分析缓存与旧地图。服务重启将持久化的运行或等待状态标为中断，保留已有有效地图；后续由用户重试。Windows 分析进程另使用带关闭即终止标志的 Job Object，并持有服务器进程句柄。服务器异常退出时，分析及其原生子进程一并结束，避免遗留计算占用。
+
+地图客户端每版整图替换并重新取景，释放旧几何与材质。相机点击后仅请求对应缩略图。未定位列表单列，并说明地图不是表面覆盖证明。正式重建重新使用普通照片流程，不读取这些预览位姿作为固定标定。
+
+### 7.4 HTTPS 与身份交接
+
+桌面仍仅监听本机 8123。旧 HTTP 手机网关为 8124，HTTPS 为 8125，两者共享同一授权状态和照片批次。仅私有网络可访问。公开资源为手机页面、`GET /mobile/connection.json`、`GET /mobile/ca.cer` 与 `GET /mobile/ios.mobileconfig`。连接 JSON 只包含 HTTPS 状态、端口及公开证书描述。
+
+[mobile-certificates.ps1](../tools/workbench/scripts/mobile-certificates.ps1) 使用 Windows .NET 原生证书接口，不安装系统信任。CA 有效 5 年；服务器证书有效 90 天，SAN 包含 localhost、127.0.0.1 和当前局域网 IPv4 地址。启用时及之后每分钟检查地址和有效期。剩余不足 14 天或 IP 集合改变时更新服务器证书，并在现有监听器替换 TLS 上下文。有效 CA 保持不变；接近到期时才替换 CA，届时手机需重新信任。
+
+私有包只写入 `certificates/current.json`，目录与文件 ACL 限制当前 Windows 用户和 SYSTEM。先写候选文件，再原子替换。失败保留原文件。`mobile-tls.mjs` 验证签名、SAN、有效期及可加载私钥后才返回。网关仅下载 CA DER 和仅含公开 CA 的 iOS 描述文件，不提供私有包、PFX 或口令。
+
+- `POST /api/mobile/v1/https-handoff`：须 Bearer，接收 `{batchId?}`，校验归属，返回 `{url,expiresIn:60}`。URL 只含随机交接码，目标主机必须为证书覆盖的私有 IPv4 或 localhost。
+- `POST /api/mobile/v1/https-handoff/redeem`：仅 HTTPS，接收 `{ticket}`。未配对也可调用，但必须持有有效单次交接码。成功 200 返回 `{token,deviceId,batchId?}`；原设备和令牌保留。过期、重复或非法交接返回 403；设备撤销返回 401。兑换前先消费交接码，不能重复使用。
+
+交接码在内存中按 SHA256 索引，服务关闭即清除。手机在发起网络请求前清除地址片段，再兑换并保存身份。HTTPS 的只读查看器 Cookie 增加 `Secure`。所有写接口继续要求 Bearer；Cookie 不能启动分析、删除、提交或训练。下载后核对 CA 指纹、手机安装和完全信任步骤见 [README](../README.md#启用页面内相机)。
+
+### 7.5 完整扫描包上传
 
 - `POST /api/mobile/v1/uploads`：请求 `{scanId,sha256,bytes}`，返回 `{id,offset,bytes,projectId?}`。`sha256` 是整个 ZIP 的哈希。
 - `GET /api/mobile/v1/uploads/:id`：返回当前设备上传的持久化状态。

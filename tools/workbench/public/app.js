@@ -703,11 +703,16 @@ async function refreshMobile() {
   $('mobileStatus').textContent = s.enabled ? `地址：${s.addresses.map(a => `http://${a}:${s.port}`).join('、') || '未发现局域网地址'}；配对码：${s.code ?? '已使用或过期，请关闭后重新启用'}` : '连接已关闭。';
   const links=$('mobileLinks');links.replaceChildren();
   for(const address of s.enabled?s.addresses:[]){const a=document.createElement('a');a.href=`http://${address}:${s.port}/mobile/`;a.textContent=`iPhone / 安卓：${a.href}`;a.target='_blank';a.rel='noopener';links.append(a,document.createElement('br'));}
+  for(const address of s.httpsEnabled?s.addresses:[]){const a=document.createElement('a');a.href=`https://${address}:${s.httpsPort}/mobile/`;a.textContent=`HTTPS 网页相机：${a.href}`;a.target='_blank';a.rel='noopener';links.append(a,document.createElement('br'));}
+  const cert=s.certificate;$('mobileCertificate').textContent=s.httpsError?`HTTPS 启动失败：${s.httpsError}`:cert?`证书 SHA-256 指纹：${cert.fingerprint}。有效期至：${cert.expiresAt}。`:'HTTPS 尚未启用。首次启用需要生成本机证书，可能需要数秒。';
+  const certificateLinks=$('mobileCertificateLinks');certificateLinks.replaceChildren();
+  if(cert&&s.enabled&&s.addresses.length){const origin=`http://${s.addresses[0]}:${s.port}`;for(const [key,label] of [['profileUrl','iPhone 描述文件'],['certUrl','Android CA 证书']]){if(!cert[key])continue;const url=new URL(cert[key],origin);if(url.origin!==origin)continue;const a=document.createElement('a');a.href=url.href;a.textContent=label;a.target='_blank';a.rel='noopener';certificateLinks.append(a,document.createElement('br'));}}
   const devices = $('mobileDevices'); devices.replaceChildren();
   for (const d of s.devices) { const row=document.createElement('div'); row.className='row'; const label=document.createElement('span');label.textContent=d.deviceName; const button=document.createElement('button');button.textContent='撤销';button.onclick=()=>mobileAction('/api/mobile/revoke',{deviceId:d.deviceId});row.append(label,button);devices.append(row); }
 }
 async function mobileAction(path, body={}) { try { $('mobileError').textContent='';const result=await api(path,{method:'POST',body:JSON.stringify(body)});await refreshMobile();if(result.projectId){await loadProjects();await openProject(result.projectId);} } catch(error){$('mobileError').textContent=error.message;} }
 $('mobileEnable').onclick=()=>mobileAction('/api/mobile/enable');
+$('mobileHttpsEnable').onclick=async()=>{const button=$('mobileHttpsEnable');button.disabled=true;button.textContent='正在启用 HTTPS…';try{await mobileAction('/api/mobile/https/enable');}finally{button.disabled=false;button.textContent='启用 HTTPS 相机';}};
 $('mobileDisable').onclick=()=>mobileAction('/api/mobile/disable');
 $('mobileImport').onclick=()=>mobileAction('/api/mobile/import',{path:$('mobileZip').value.trim()});
 refreshMobile().catch(error=>{$('mobileError').textContent=error.message;});

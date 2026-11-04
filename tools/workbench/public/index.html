@@ -20,7 +20,10 @@
   <summary>手机照片重建与 LiDAR 导入</summary>
   <p id="mobileStatus" class="muted"></p>
   <div id="mobileLinks"></div>
-  <div class="row"><button id="mobileEnable">启用连接</button><button id="mobileDisable">关闭连接</button></div>
+  <div class="row"><button id="mobileEnable">启用 HTTP</button><button id="mobileHttpsEnable">启用 HTTPS 相机</button><button id="mobileDisable">关闭全部连接</button></div>
+  <p id="mobileCertificate" class="muted" style="overflow-wrap:anywhere"></p>
+  <div id="mobileCertificateLinks"></div>
+  <details class="muted"><summary>手机 HTTPS 信任设置</summary><p>先通过 HTTP 配对。核对证书指纹，再安装证书。</p><p>iPhone：下载描述文件。在“设置 → 通用 → VPN 与设备管理”安装。再到“通用 → 关于本机 → 证书信任设置”开启完全信任。</p><p>Android：下载 CA 证书。在“设置 → 安全 → 加密与凭据”中安装 CA。不同系统的菜单名称可能不同。</p><p>信任证书后，返回已配对的手机页面，点“转到 HTTPS”。此操作使用 60 秒内有效的一次性连接。若不能使用网页相机，请使用系统相机或相册。</p><p>证书安装必须由用户完成。请只信任你管理的工作台。浏览器不能自动安装证书。</p></details>
   <div id="mobileDevices"></div>
   <label for="mobileZip">扫描包路径</label>
   <input id="mobileZip" placeholder="C:\扫描.gaussroom.zip">

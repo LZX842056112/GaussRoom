@@ -15,6 +15,7 @@ import { getContext as defaultGetContext, assistanceSource } from './lib/assista
 import { listAttempts, readAttempt } from './lib/attempts.mjs';
 import { qualityFor, saveReview, evaluationFor } from './lib/quality.mjs';
 import {previewFactReuse,reuseFacts,importPhotos} from './lib/assistance-import.mjs';
+import {computeOwner} from './lib/compute-slot.mjs';
 
 export function createWorkbenchServer({getContext=defaultGetContext,jobRuntime={}}={}) {
 const router = createRouter();
@@ -35,8 +36,9 @@ function diskFreeBytes() {
 
 router.get('/api/mobile/status', (request,response)=>sendJson(response,200,mobile.status()));
 router.post('/api/mobile/enable', async (request,response)=>sendJson(response,200,await mobile.enable()));
+router.post('/api/mobile/https/enable', async (request,response)=>sendJson(response,200,await mobile.enableHttps()));
 router.post('/api/mobile/disable', async (request,response)=>{await mobile.disable();sendJson(response,200,mobile.status());});
-router.post('/api/mobile/revoke', async (request,response)=>{const body=await readJson(request);mobile.revoke(body.deviceId);sendJson(response,200,mobile.status());});
+router.post('/api/mobile/revoke', async (request,response)=>{const body=await readJson(request);await mobile.revoke(body.deviceId);sendJson(response,200,mobile.status());});
 router.post('/api/mobile/import', async (request,response)=>{const body=await readJson(request);sendJson(response,200,await mobile.offlineImport(body.path));});
 router.get("/api/health", (request, response) => {
   sendJson(response, 200, {
@@ -46,6 +48,7 @@ router.get("/api/health", (request, response) => {
     paths: { repo: REPO, projects: PROJECTS_DIR, tools: TOOLS },
     diskFreeBytes: diskFreeBytes(),
     busyProject: jobs.busyId(),
+    computeTask: computeOwner(),
   });
 });
 
@@ -346,7 +349,8 @@ const server = createServer(async (request, response) => {
     else response.destroy();
   }
 });
-server.on("close",()=>{ void mobile.disable(); });
+server.stopMobile=()=>mobile.disable();
+server.on("close",()=>{ void mobile.disable().catch(error=>console.error('[mobile] 关闭失败：',error.code??error.name)); });
 return server;
 }
 
@@ -363,6 +367,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   console.log(`\n[workbench] 收到 ${signal}，正在终止子进程…`);
   try {
+    await server.stopMobile();
     await jobs.killAll();
   } catch (error) {
     console.error(`[workbench] 终止子进程失败：${error.message}`);

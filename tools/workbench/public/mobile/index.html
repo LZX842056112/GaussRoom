@@ -19,6 +19,13 @@
   <div class="hero"><p class="eyebrow">记录空间的每一个视角</p><h1>从照片，到三维空间<span>。</span></h1><p>手机拍摄，电脑重建，随时打开你的空间。</p></div>
   <nav class="stepper" aria-label="重建步骤"><span id="connectStep" class="step is-active"><b>1</b>连接</span><span id="photosStep" class="step"><b>2</b>照片</span><span id="rebuildStep" class="step"><b>3</b>重建</span></nav>
   <p id="message" role="status" aria-live="polite"></p>
+  <section id="secureSection" class="card" hidden>
+    <h2>启用网页相机</h2><p class="section-description">网页相机需要 HTTPS。首次使用时，必须在手机上安装并信任本机证书。浏览器不能自动完成此步骤。</p>
+    <p id="secureStatus"></p><div id="certificateLinks"></div>
+    <details class="help"><summary>安装证书</summary><p>先核对电脑显示的证书指纹。iPhone：下载描述文件，在“设置 → 通用 → VPN 与设备管理”安装。再到“通用 → 关于本机 → 证书信任设置”开启完全信任。Android：下载 CA 证书，在“设置 → 安全 → 加密与凭据”中安装 CA。不同系统的菜单名称可能不同。</p><p>只在你管理的电脑上使用此证书。完成信任设置后，点“转到 HTTPS”。相册和系统相机仍可使用。</p></details>
+    <div class="auto-controls"><button id="refreshSecure" class="secondary" type="button">刷新连接信息</button><button id="secureHandoff" class="secondary" type="button" disabled>转到 HTTPS</button></div>
+  </section>
+  <section id="captureRecovery" class="card" hidden><h2>本地待上传照片</h2><p id="recoveryInfo" class="section-description"></p><p class="footnote">重新配对不会删除本地照片。若原授权已撤销，请创建新批次，再明确转移照片。此操作不会访问旧批次。</p><button id="recoverCaptures" class="secondary" type="button">转移到当前新批次并上传</button></section>
   <section id="pairSection" class="card">
     <div class="section-heading"><div><p class="eyebrow">开始使用</p><h2>连接你的电脑</h2></div><span class="section-icon">01</span></div>
     <p class="section-description">在电脑工作台启用手机连接，输入显示的配对码。</p>
@@ -47,11 +54,22 @@
     <div class="section-heading"><div><p class="eyebrow">照片采集</p><h2>添加空间照片 <span id="photoCount" class="count-badge">0</span></h2></div><span id="batchState" class="status-badge">待上传</span></div>
     <p id="batchInfo" class="section-description"></p>
     <div class="photo-stats" aria-label="照片统计"><div><strong id="validCount">0</strong><span>有效照片</span></div><div><strong id="attentionCount">0</strong><span>待处理</span></div><div><strong id="photoSize">0 KiB</strong><span>已占用</span></div></div>
+    <div class="auto-capture">
+      <div class="library-heading"><h3>自动采集</h3><span id="captureState" class="status-badge">未启动</span></div>
+      <video id="captureVideo" autoplay muted playsinline aria-label="后置相机预览" hidden></video>
+      <p id="captureResolution" class="footnote">使用后置相机。请求 1920 × 1080 或更高分辨率。</p>
+      <p class="footnote">照片取自视频帧，保存为 JPEG（质量 94%）。保留完整画面。分辨率通常低于系统相机原图。</p>
+      <label>检查间隔<select id="captureInterval"><option value="1000">1 秒</option><option value="1500" selected>1.5 秒</option><option value="2000">2 秒</option></select></label>
+      <div class="auto-controls"><button id="captureStart" class="primary" type="button">启动自动采集</button><button id="capturePause" class="secondary" type="button" disabled>暂停</button><button id="captureStop" class="secondary" type="button" disabled>停止相机</button><button id="captureManual" class="secondary" type="button" disabled>手动补拍</button></div>
+      <p id="captureReason" role="status" aria-live="polite" class="attention-note"></p><p id="captureCounts" class="footnote"></p>
+      <button id="retryCaptures" class="text-button" type="button" hidden>重试本地照片上传</button>
+      <details class="help"><summary>采集提示</summary><p>缓慢移动。相邻照片保留约 70% 的重叠区域。在门口向两个房间分别拍摄。使用高、中、低三个高度。原地改变朝向后，可以继续采集。</p><p>避开纯色墙面、强反光和移动物体。若画面纹理不足，重复检测不能给出可靠结论。手动补拍会跳过重复检测。</p><p>页面进入后台时会暂停。回到前台后，请点“继续采集”。请保留本页，直到本地待上传数量为 0。浏览器清除网站数据会丢失本地照片。</p></details>
+    </div>
     <div class="capture-actions">
       <label class="capture-button album-button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="4"/><path d="m3 16 5-5 5 5 3-3 5 5M15 7h.01"/></svg><span>选择相册<small>支持批量添加</small></span><input id="gallery" type="file" accept=".jpg,.jpeg,.png" multiple></label>
       <label class="capture-button camera-button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M8 5 9.5 3h5L16 5h4v15H4V5h4Z"/><circle cx="12" cy="12" r="4"/></svg><span>拍照<small>使用系统相机</small></span><input id="camera" type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" capture="environment"></label>
     </div>
-    <details class="help"><summary>照片要求与拍摄提示</summary><p id="limits"></p><p id="formatNote"></p><p>如果不能打开相机，请先拍照，再从相册选择。原始照片不会被压缩。</p></details>
+    <details class="help"><summary>照片要求与拍摄提示</summary><p id="limits"></p><p id="formatNote"></p><p>如果不能打开网页相机，请使用系统相机或相册。相册和系统相机的文件不会在网页中压缩。</p></details>
     <div id="transferStatus" class="transfer-status" hidden><p id="uploadProgress" role="status" aria-live="polite"></p><progress id="uploadMeter" max="1" value="0" aria-label="当前照片上传进度"></progress></div>
     <p id="reselect" class="attention-note"></p>
     <details id="queuedDetails" class="queue-panel" hidden><summary id="queueSummary">待上传照片</summary><ul id="queued"></ul><button id="retryQueue" class="secondary full" hidden>继续上传待处理照片</button></details>
@@ -62,6 +80,7 @@
       <ul id="files" class="photo-list" aria-label="照片列表"></ul>
       <div id="photoPager" class="photo-pager" hidden><button id="prevPhotos" class="secondary" type="button">上一页</button><span id="photoPage" aria-live="polite"></span><button id="nextPhotos" class="secondary" type="button">下一页</button></div>
     </div>
+    <details id="captureMapPanel" class="capture-map-panel"><summary>查看采集位置估计</summary><p class="footnote">此图使用已上传照片估计相机位置和稀疏点。尺度未实测。此图不表示表面覆盖率，也不显示当前手机位置。</p><p id="analysisStatus" role="status" class="section-description">首批需要 20 张照片。之后每新增 12 张照片更新，更新间隔至少 15 秒。</p><div class="auto-controls"><button id="analyzeCapture" class="secondary" type="button">更新位置估计</button><button id="cancelAnalysis" class="secondary" type="button">停止分析</button><button id="fitCaptureMap" class="secondary" type="button">适合视图</button></div><div id="captureMap" aria-label="已上传照片的相机位置估计"></div><p id="captureMapCounts" class="footnote"></p><img id="mapThumbnail" alt="选中相机的照片缩略图" hidden><p id="mapSelection" class="footnote"></p><details class="help"><summary>未定位的照片</summary><ul id="unlocalizedPhotos"></ul></details><details class="help"><summary>可能重复的照片</summary><ul id="suspectedDuplicates"></ul></details></details>
     <div class="card-footer"><button id="commit" class="primary full">提交照片并创建项目</button><p class="footnote">照片就绪后创建项目，再开始重建。</p></div>
   </section>
   <section id="projectSection" class="card" hidden>

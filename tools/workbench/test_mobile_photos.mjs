@@ -22,6 +22,18 @@ async function start(f) {await new Promise(ok=>f.server.listen(0,'127.0.0.1',ok)
 async function call(url,method='GET',body,device='a') {const binary=Buffer.isBuffer(body); const r=await fetch(url,{method,headers:{device,...(body!==undefined&&!binary?{'content-type':'application/json'}:{})},body:body===undefined?undefined:binary?body:JSON.stringify(body)});return [r.status,await r.json()];}
 async function add(url,name,bytes) {const [,b]=await call(url+'/files','POST',{name,bytes}); return b.fileId;}
 
+test('client capture IDs survive lost registration replies without reserving another file',async t=>{
+ const f=fixture(t),base=await start(f),s=(await call(base,'POST',{name:'camera'}))[1],url=base+'/'+s.id;
+ const clientCaptureId='22ee18c0-e8cd-45c2-876d-c8f891824b35',body={name:'camera.jpg',bytes:3,clientCaptureId};
+ const first=await call(url+'/files','POST',body);assert.equal(first[0],200);
+ const again=await call(url+'/files','POST',body);assert.equal(again[0],200);assert.equal(again[1].fileId,first[1].fileId);assert.equal(again[1].session.files.length,1);
+ assert.equal(again[1].session.files[0].clientCaptureId,clientCaptureId);
+ assert.equal((await call(url+'/files','POST',{...body,bytes:4}))[0],409);
+ assert.equal((await call(url+'/files','POST',{...body,clientCaptureId:'../bad'}))[0],400);
+ await call(url+'/files/'+first[1].fileId,'PUT',Buffer.from('abc'));f.restart();
+ const restored=await call(url+'/files','POST',body);assert.equal(restored[1].fileId,first[1].fileId);assert.equal(restored[1].session.files[0].status,'ready');
+});
+
 test('only an active owner can delete an open batch and its uploaded files',async t=>{
  const f=fixture(t),base=await start(f),s=(await call(base,'POST',{name:'delete batch'}))[1],url=base+'/'+s.id;
  const id=await add(url,'a.jpg',3);await call(url+'/files/'+id,'PUT',Buffer.from('abc'));

@@ -1,0 +1,35 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {request as httpsRequest} from 'node:https';
+import {mkdtempSync,rmSync,readFileSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createMobileGateway} from './lib/mobile.mjs';
+import {ensureMobileCertificates} from './lib/mobile-tls.mjs';
+
+test('HTTPS shares authorization, migrates identity once, and publishes only public certificates',{skip:process.platform!=='win32',timeout:45000},async t=>{
+ const root=mkdtempSync(join(tmpdir(),'mobile-secure-'));let now=Date.now();
+ const cert=await ensureMobileCertificates({root:join(root,'certs'),addresses:[]});
+ const g=createMobileGateway({stateRoot:join(root,'state'),clock:()=>now,certificateProvider:async()=>cert,photoCapabilities:async()=>({photoFormats:['.jpg']})});
+ t.after(async()=>{await g.disable();rmSync(root,{recursive:true,force:true});});
+ const http=await g.enable({port:0,host:'127.0.0.1'}),origin=`http://127.0.0.1:${http.port}`,base='/api/mobile/v1';
+ const httpCall=async(path,method='GET',body,token)=>{const r=await fetch(origin+path,{method,headers:{...(token?{authorization:`Bearer ${token}`} :{}),...(body!==undefined?{'content-type':'application/json'}:{})},body:body===undefined?undefined:JSON.stringify(body)});return {status:r.status,headers:r.headers,body:await r.json()};};
+ const device=(await httpCall(base+'/pair','POST',{code:http.code,deviceName:'phone'})).body;
+ const session=(await httpCall(base+'/photo-sessions','POST',{name:'keep this batch'},device.token)).body;
+ const secure=await g.enableHttps({port:0,host:'127.0.0.1'});assert.equal(secure.httpsEnabled,true);assert.equal(secure.port,http.port);
+ const call=(path,method='GET',body,headers={})=>new Promise((resolve,reject)=>{const req=httpsRequest({hostname:'127.0.0.1',port:secure.httpsPort,path,method,ca:cert.caPem,headers:{...headers,...(body===undefined?{}:{'content-type':'application/json'})}},res=>{const chunks=[];res.on('data',b=>chunks.push(b));res.on('end',()=>{const bytes=Buffer.concat(chunks);let data;try{data=JSON.parse(bytes);}catch{data=bytes;}resolve({status:res.statusCode,headers:res.headers,body:data});});});req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));});
+ const info=(await httpCall('/mobile/connection.json')).body;assert.equal(info.httpsEnabled,true);assert.equal(info.certificate.fingerprint,cert.fingerprint);
+ assert.equal((await call('/mobile/ca.cer')).body.equals(cert.caDer),true);assert.ok((await call('/mobile/ios.mobileconfig')).body.includes(Buffer.from('com.apple.security.root')));
+ assert.equal((await call('/mobile/certificates/current.json')).status,401);
+ const issued=await httpCall(base+'/https-handoff','POST',{batchId:session.id},device.token);assert.equal(issued.status,200);const link=new URL(issued.body.url);assert.equal(link.protocol,'https:');assert.ok(!link.href.includes(device.token));const ticket=new URLSearchParams(link.hash.slice(1)).get('handoff');assert.ok(ticket);
+ assert.equal((await httpCall(base+'/https-handoff/redeem','POST',{ticket})).status,403);
+ const redeemed=await call(base+'/https-handoff/redeem','POST',{ticket});assert.equal(redeemed.status,200);assert.deepEqual(redeemed.body,{token:device.token,deviceId:device.deviceId,batchId:session.id});assert.equal((await call(base+'/https-handoff/redeem','POST',{ticket})).status,403);
+ const bearer={authorization:`Bearer ${device.token}`};assert.equal((await call(base+'/photo-sessions/'+session.id,'GET',undefined,bearer)).status,200);
+ assert.equal((await call(base+'/capabilities','GET',undefined,bearer)).body.deviceId,device.deviceId);
+ const cookie=(await call(base+'/session','POST',{},bearer)).headers['set-cookie'][0];assert.match(cookie,/; Secure/);const readCookie={cookie:cookie.split(';')[0]};assert.equal((await call(base+'/photo-sessions/'+session.id,'GET',undefined,readCookie)).status,200);assert.equal((await call(base+'/photo-sessions','POST',{name:'blocked'},readCookie)).status,401);
+ const expired=await httpCall(base+'/https-handoff','POST',{},device.token);now+=60001;assert.equal((await call(base+'/https-handoff/redeem','POST',{ticket:new URLSearchParams(new URL(expired.body.url).hash.slice(1)).get('handoff')})).status,403);
+ const revoked=await httpCall(base+'/https-handoff','POST',{},device.token);await g.revoke(device.deviceId);assert.equal((await call(base+'/https-handoff/redeem','POST',{ticket:new URLSearchParams(new URL(revoked.body.url).hash.slice(1)).get('handoff')})).status,401);
+ assert.equal((await call(base+'/photo-sessions/'+session.id,'GET',undefined,bearer)).status,401);
+ assert.ok(!JSON.stringify(g.status()).includes(cert.passphrase));assert.equal(JSON.parse(readFileSync(join(root,'state','state.json'))).devices[device.deviceId],undefined);
+ await g.disable();assert.equal(g.status().httpsEnabled,false);await assert.rejects(call('/mobile/connection.json'));
+});
