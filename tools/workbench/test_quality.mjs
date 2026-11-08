@@ -77,6 +77,8 @@ test('checkpoint resume preserves exports and verifies checkpoint identity befor
   const { createHash } = await import('node:crypto');
   const p = { ...project, id: 'quality-resume-test', selectedModel: '0', trainingPreset: 'full' };
   const d = pipeline.dirs(p);
+  // 被中断的运行可能留下 train/ 导出；先清掉，避免别处残留的检查点让本次误判
+  fs.rmSync(d.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
   fs.mkdirSync(resolve(d.sparse, '0'), { recursive: true });
   fs.mkdirSync(resolve(d.undistorted, 'sparse'), { recursive: true });
   fs.mkdirSync(d.summary, { recursive: true });
@@ -126,7 +128,7 @@ test('checkpoint resume preserves exports and verifies checkpoint identity befor
     fs.rmSync(checkpoint);
     delete p.trainingResume;
     assert.deepEqual(train.clean(d, p), [d.train]);
-  } finally { fs.rmSync(d.root, { recursive: true, force: true }); }
+  } finally { fs.rmSync(d.root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); }
 });
 
 test('sparse reconstruction invokes safe calibration wrapper', () => {
