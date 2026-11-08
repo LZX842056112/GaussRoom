@@ -37,9 +37,9 @@
   <main>
     <section id="emptyView">
       <div class="card">
-        <h2>从一组照片重建可漫游的三维场景</h2>
-        <p class="muted">导入一个图片文件夹，工作台会依次完成特征提取、匹配、稀疏重建、几何门禁、去畸变与三维高斯训练，最后在同一页面里漫游。</p>
-        <p class="muted">原图只读：工作台只在项目目录里生成长边 2048 的工作副本，不会修改、移动或上传你的照片。</p>
+        <h2>从照片或视频重建可漫游的三维场景</h2>
+        <p class="muted">导入图片文件夹，或选择一段房屋视频（也可两者混合）。视频会自动抽帧：按走动速度挑选清晰、间隔均匀的帧，再与照片一起进入特征提取、匹配、稀疏重建、几何门禁、去畸变与三维高斯训练。</p>
+        <p class="muted">原文件只读：工作台只在项目目录里生成长边 2048 的工作副本与抽帧缓存，不会修改、移动或上传你的照片和视频。</p>
       </div>
     </section>
 
@@ -51,12 +51,33 @@
           <input id="formName" type="text" placeholder="例如：客厅扫描">
         </div>
         <div class="field">
-          <label for="formSource">图片文件夹</label>
+          <label for="formSource">图片文件夹（可选）</label>
           <div class="row">
             <input id="formSource" type="text" placeholder="C:\Users\...\图片文件夹">
             <button id="pickFolder">选择文件夹…</button>
           </div>
           <p id="sourceHint" class="muted" style="font-size:12px"></p>
+        </div>
+        <div class="field">
+          <label for="formVideos">房屋视频（可选，可多选）</label>
+          <div class="row">
+            <input id="formVideos" type="text" readonly placeholder="尚未选择视频">
+            <button id="pickVideos">选择视频…</button>
+            <button id="clearVideos">清空</button>
+          </div>
+          <p id="videoHint" class="muted" style="font-size:12px"></p>
+        </div>
+        <div class="field">
+          <label for="formFrameTarget">每段视频保留帧数</label>
+          <select id="formFrameTarget" style="width:auto;display:inline-block">
+            <option value="0" selected>自动（按时长，40–300 帧）</option>
+            <option value="60">60 帧（快速预览）</option>
+            <option value="120">120 帧</option>
+            <option value="180">180 帧</option>
+            <option value="240">240 帧</option>
+            <option value="300">300 帧（完整）</option>
+          </select>
+          <p class="muted" style="font-size:12px">帧数越多覆盖越全，但匹配与训练耗时约按帧数平方增长。边走边拍、相邻画面保留约 70% 重叠时质量最好。</p>
         </div>
         <div class="field">
           <label>训练档位（必选）</label>

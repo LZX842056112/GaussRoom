@@ -12,3 +12,18 @@
 @media(prefers-reduced-motion:reduce){*{transition:none!important}}
 .batch-actions{display:flex;align-items:center;justify-content:space-between;gap:12px;border-top:1px solid var(--border);padding:10px 22px}.batch-actions>span{font-size:10px;color:var(--muted)}.danger-button{min-height:36px;padding:6px 11px;font-size:11px;border-radius:8px;background:#fff3f3;border-color:#f9dddd;color:#b94949;white-space:nowrap}.danger-button:enabled:hover{background:#ffe8e8}
 .delete-dialog{width:min(360px,calc(100% - 40px));max-height:80vh;overflow-y:auto;border:1px solid var(--border);border-radius:20px;padding:24px;color:#21334d;background:#fff;box-shadow:0 16px 80px #14273e30}.delete-dialog::backdrop{background:#1e314977;backdrop-filter:blur(3px)}.delete-icon{display:grid;place-items:center;width:42px;height:42px;background:#fff0f0;color:#c14c4c;border-radius:13px;font-size:28px;margin-bottom:16px}.delete-dialog h2{font-size:20px;margin-bottom:9px}.delete-dialog>strong{display:block;font-size:14px;font-weight:500;overflow-wrap:anywhere}.delete-dialog>p{font-size:12px;color:#78879e;line-height:1.8;margin:12px 0 22px}.dialog-actions{display:flex;gap:10px}.dialog-actions>button{flex:1;font-size:13px}.danger-solid{background:#c14646;color:white}.danger-solid:enabled:hover{background:#aa3737}
+
+/* 视频上传列表：一行一段视频，状态靠右侧徽标区分 */
+.video-list{list-style:none;margin:12px 0 0;padding:0;display:grid;gap:8px}
+.video-row{display:grid;grid-template-columns:1fr auto;gap:2px 10px;padding:10px 12px;border:1px solid var(--line,#dbe3ef);border-radius:12px;background:#fff}
+.video-row .video-name{font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.video-row .video-detail{grid-column:1;font-size:12px;color:#5b6b82}
+.video-row .video-state{grid-column:2;grid-row:1 / span 2;align-self:center;font-size:12px;padding:2px 8px;border-radius:999px;background:#eef2f8;color:#41506a}
+.video-row.ready .video-state{background:#e3f6ea;color:#1c6b3a}
+.video-row.failed .video-state{background:#fdeaea;color:#a2241c}
+.video-row.uploading .video-state,.video-row.probing .video-state{background:#fff4de;color:#8a5a00}
+.video-list:empty{display:none}
+
+.video-row .video-actions{grid-column:2;grid-row:2;display:flex;gap:8px;justify-content:flex-end}
+.video-row .video-actions .text-button{font-size:12px;padding:2px 0}
+.video-list:empty{display:none}

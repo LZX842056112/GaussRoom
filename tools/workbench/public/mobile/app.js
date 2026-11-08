@@ -1,10 +1,14 @@
 import {canCommit, needsReselect, unfinished, formatBytes, timingLabel, uploadLabel, shouldPoll, photoView} from './state.mjs';
 import {captureDecision,frameMetrics,CaptureLoop,CaptureStore,uploadPending,canStoreCapture} from './capture.mjs';
 import {createCaptureGuidance} from './capture-guidance.mjs';
+import {initVideoUpload} from './video.mjs';
 const $ = id => document.getElementById(id), base='/api/mobile/v1';
 const handoffParams=new URLSearchParams(location.hash.slice(1)),handoffTicket=handoffParams.get('handoff');
 if(handoffParams.has('handoff'))history.replaceState(null,'',location.pathname+location.search);
 let token=localStorage.getItem('gr.mobile.token')||'', batch=null, project=null, capabilities=null, busy=false, queue=[], local=new Map(), thumbs=new Map(), thumbQueue=[], thumbnailing=false, pollTimer=null, pollAbort=null, pollGeneration=0, uploadProgress=null, thumbGeneration=0;
+// Module-scoped, assigned below. Declared up front so clearAuthorization() can
+// reach it without hitting the temporal dead zone of a later `const`.
+let videoUI=null;
 let photoFilter='all',photosExpanded=false,photoPage=0;
 const captureStore=new CaptureStore();
 let deviceId=localStorage.getItem('gr.mobile.device')||'',pendingCaptures=[],storageReady=false,stream=null,openingCamera=false,cameraGeneration=0,wakeLock=null,captureHistory=[],acceptedCaptures=0,skippedCaptures=0,captureUploading=false,captureUploadTimer=null,captureUploadAbort=null,captureUploadGeneration=0;
@@ -18,13 +22,27 @@ const statusLabel=value=>labels[value]||value||'待检查';
 function resetPhotoView(){photoFilter='all';photosExpanded=false;photoPage=0;}
 const say = text => $('message').textContent=text;
 const saveQueue = () => { if(batch) localStorage.setItem(`gr.mobile.queue.${batch.id}`,JSON.stringify(queue.map(f=>({name:f.name,size:f.size})))); };
-function clearAuthorization(){stopCapture('授权已失效。相机已停止。本地待上传照片仍保留。');stopCaptureUploads();stopAnalysisPolling();resetCaptureMap();token='';deviceId='';localStorage.removeItem('gr.mobile.token');localStorage.removeItem('gr.mobile.device');localStorage.removeItem('gr.mobile.batch');stopPoll();resetPhotoView();batch=null;project=null;capabilities=null;queue=[];local.clear();thumbs.clear();thumbQueue=[];thumbGeneration++;uploadProgress=null;$('camera').value='';$('gallery').value='';$('sessions').replaceChildren(new Option('选择批次',''));for(const id of ['batchInfo','projectInfo','progress','timing','quality','formatNote'])$(id).textContent='';$('steps').replaceChildren();$('viewer').removeAttribute('href');render();say('授权已失效，请重新配对。本地待上传照片仍保留。');}
+function clearAuthorization(){stopCapture('授权已失效。相机已停止。本地待上传照片仍保留。');stopCaptureUploads();stopAnalysisPolling();resetCaptureMap();token='';deviceId='';localStorage.removeItem('gr.mobile.token');localStorage.removeItem('gr.mobile.device');localStorage.removeItem('gr.mobile.batch');stopPoll();resetPhotoView();batch=null;project=null;capabilities=null;queue=[];local.clear();thumbs.clear();thumbQueue=[];thumbGeneration++;uploadProgress=null;$('camera').value='';$('gallery').value='';$('sessions').replaceChildren(new Option('选择批次',''));for(const id of ['batchInfo','projectInfo','progress','timing','quality','formatNote'])$(id).textContent='';$('steps').replaceChildren();$('viewer').removeAttribute('href');videoUI?.refresh('', null);render();say('授权已失效，请重新配对。本地待上传照片仍保留。');}
 function restoreQueue(id){try{const entries=JSON.parse(localStorage.getItem(`gr.mobile.queue.${id}`)||'[]');return Array.isArray(entries)?entries.filter(x=>typeof x.name==='string'&&Number.isSafeInteger(x.size)&&x.size>0).map(x=>({...x,needsFile:true})):[];}catch{return [];}}
 async function api(path, options={}) {
  const headers=new Headers(options.headers||{}); if(token) headers.set('Authorization',`Bearer ${token}`);
  if(options.json!==undefined){headers.set('Content-Type','application/json');options.body=JSON.stringify(options.json);delete options.json;}
- const response=await fetch(base+path,{...options,headers,credentials:'same-origin'});
- const data=await response.json().catch(()=>({}));
+ // A hung control request must reject, otherwise every caller that sets
+ // `busy` (video.mjs: handleFiles/revalidate/removeFile/commit/clear) stays
+ // locked until a manual page reload. Relay an upstream AbortSignal instead of
+ // using AbortSignal.any(), which older iPhone Safari builds do not implement.
+ const controller=new AbortController(), caller=options.signal, relay=()=>controller.abort();
+ if(caller){if(caller.aborted)controller.abort();else caller.addEventListener('abort',relay,{once:true});}
+ let timedOut=false;
+ const timer=setTimeout(()=>{timedOut=true;controller.abort();},30000);
+ let response,data;
+ try{
+  response=await fetch(base+path,{...options,headers,signal:controller.signal,credentials:'same-origin'});
+  try{data=await response.json();}catch(e){if(timedOut)throw new Error('请求超时，请检查电脑是否在线后重试。');data={};}
+ }catch(e){
+  if(timedOut)throw new Error('请求超时，请检查电脑是否在线后重试。');
+  throw e;
+ }finally{clearTimeout(timer);if(caller)caller.removeEventListener('abort',relay);}
  if(!response.ok){if(response.status===401){clearAuthorization();} const e=new Error(response.status===401?'授权已失效，请重新配对。':data.error||`请求失败 (${response.status})`);e.status=response.status;throw e;}
  return data;
 }
@@ -270,7 +288,7 @@ async function loadProject(){
  catch(e){if(e.name==='AbortError'||generation!==pollGeneration){stopped=true;return;}stopped=e.status===401||e.status===404;retry=!stopped;say(e.message);}
  finally{if(pollAbort===controller)pollAbort=null;if(!stopped&&generation===pollGeneration&&batch?.projectId===projectId&&(retry||shouldPoll(project,generation,pollGeneration)))pollTimer=setTimeout(loadProject,2000);}
 }
-async function init(){if(!token){render();return;}await api('/session',{method:'POST'});capabilities=await api('/capabilities');if(capabilities.deviceId){deviceId=capabilities.deviceId;localStorage.setItem('gr.mobile.device',deviceId);}$('camera').accept=['image/jpeg','image/png',...capabilities.photoFormats].join(',');$('gallery').accept=capabilities.photoFormats.join(',');$('formatNote').textContent=capabilities.photoFormats.some(x=>/heic|heif/i.test(x))?'如果无法选择 HEIC，请在手机中先转为 JPEG 或 PNG。':'此工作台不支持 HEIC/HEIF。请先在手机中转为 JPEG 或 PNG。';for(const option of $('preset').options)option.disabled=!capabilities.trainingPresets.includes(option.value);$('limits').textContent=`支持：${capabilities.photoFormats.join('、')}；单张不超过 ${formatBytes(capabilities.limits.maxFileBytes)}，最多 ${capabilities.limits.maxFiles} 张；照片长边至少 ${capabilities.limits.minLongEdge} 像素。`;await getSessions();const id=localStorage.getItem('gr.mobile.batch');if(id)try{await loadBatch(id);}catch(e){if(e.status!==404)throw e;localStorage.removeItem('gr.mobile.batch');}render();}
+async function init(){if(!token){render();return;}await api('/session',{method:'POST'});capabilities=await api('/capabilities');if(capabilities.deviceId){deviceId=capabilities.deviceId;localStorage.setItem('gr.mobile.device',deviceId);}$('camera').accept=['image/jpeg','image/png',...capabilities.photoFormats].join(',');$('gallery').accept=capabilities.photoFormats.join(',');videoUI?.refresh(token,capabilities);$('formatNote').textContent=capabilities.photoFormats.some(x=>/heic|heif/i.test(x))?'如果无法选择 HEIC，请在手机中先转为 JPEG 或 PNG。':'此工作台不支持 HEIC/HEIF。请先在手机中转为 JPEG 或 PNG。';for(const option of $('preset').options)option.disabled=!capabilities.trainingPresets.includes(option.value);$('limits').textContent=`支持：${capabilities.photoFormats.join('、')}；单张不超过 ${formatBytes(capabilities.limits.maxFileBytes)}，最多 ${capabilities.limits.maxFiles} 张；照片长边至少 ${capabilities.limits.minLongEdge} 像素。`;await getSessions();const id=localStorage.getItem('gr.mobile.batch');if(id)try{await loadBatch(id);}catch(e){if(e.status!==404)throw e;localStorage.removeItem('gr.mobile.batch');}render();}
 $('pairForm').onsubmit=e=>{e.preventDefault();action(async()=>{const result=await api('/pair',{method:'POST',json:{code:$('code').value,deviceName:$('device').value}});token=result.token;deviceId=result.deviceId||'';localStorage.setItem('gr.mobile.token',token);localStorage.setItem('gr.mobile.device',deviceId);localStorage.removeItem('gr.mobile.batch');batch=null;project=null;await init();say('配对成功。');});};
 $('createForm').onsubmit=e=>{e.preventDefault();action(async()=>{stopCapture();await captureLoop.current?.catch(()=>{});stopCaptureUploads();await cancelCaptureAnalysis();resetCaptureMap();batch=await api('/photo-sessions',{method:'POST',json:{name:$('name').value,trainingPreset:$('preset').value}});localStorage.setItem('gr.mobile.batch',batch.id);recoveryTargetId=`${deviceId}:${batch.id}`;localStorage.setItem('gr.mobile.recoveryTarget',recoveryTargetId);project=null;queue=[];local.clear();thumbs.clear();captureHistory=[];acceptedCaptures=skippedCaptures=0;resetPhotoView();$('projectSetup').open=false;startAnalysisPolling();await getSessions();say('批次已创建。');});};
 $('sessions').onchange=e=>{if(e.target.value)action(()=>loadBatch(e.target.value));};
@@ -309,4 +327,5 @@ async function bootstrap(){
  }
  await loadConnection();await action(init);
 }
+videoUI=initVideoUpload({api,$,say,onProject:async(id)=>{batch=Object.assign({},batch,{projectId:id});await loadProject();}});
 bootstrap();

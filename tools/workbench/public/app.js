@@ -8,6 +8,9 @@ const state = {
   formPreset: null,
   projectPreset: null,
   sourcePath: "",
+  videoPaths: [],
+  video: null,
+  frameTarget: 0,
   eventSource: null,
   pauseScroll: false,
   logStep: null,
@@ -64,6 +67,7 @@ function show(view) {
 
 async function loadHealth() {
   const health = await api("/api/health");
+  state.video = health.video ?? null;
   const labels = {
     python: "Python", colmapGpu: "COLMAP(GPU)", colmapCpu: "COLMAP(CPU)",
     brush: "Brush", ffmpeg: "ffmpeg", pycolmap: "pycolmap", opencv: "OpenCV",
@@ -75,6 +79,12 @@ async function loadHealth() {
   }).join("") + (health.diskFreeBytes != null
     ? `<span class="chip ${health.diskFreeBytes < 20e9 ? "bad" : "ok"}">可用磁盘 ${formatBytes(health.diskFreeBytes)}</span>`
     : "");
+  // Video needs ffmpeg *and* ffprobe; the hint explains the fix rather than
+  // leaving a disabled control with no reason.
+  if (state.video && !state.video.canIngestVideo) {
+    $("videoHint").textContent = `${state.video.message}。在此之前只能使用图片文件夹。`;
+  }
+  renderForm();
 }
 
 let lastListSignature = "";
@@ -127,7 +137,25 @@ function renderForm() {
   if (!state.presets) return;
   presetCards($("presetList"), state.formPreset, (key) => { state.formPreset = key; renderForm(); });
   $("formSource").value = state.sourcePath;
-  $("sourceHint").textContent = state.sourcePath ? "" : "支持 JPG / PNG / WEBP / HEIC / TIFF，至少 2 张。";
+  const canVideo = state.video?.canIngestVideo !== false;
+  const videos = state.videoPaths;
+  $("formVideos").value = videos.map((item) => item.name).join("、");
+  $("pickVideos").disabled = !canVideo;
+  $("clearVideos").disabled = !videos.length;
+  $("formFrameTarget").value = String(state.frameTarget ?? 0);
+  if (!videos.length) {
+    $("videoHint").textContent = canVideo
+      ? "支持 MP4 / MOV / MKV 等；建议单段 8 分钟以内、1080p 以上、边走边拍。"
+      : (state.video?.message ?? "视频功能不可用：未检测到 ffmpeg / ffprobe。");
+  } else {
+    const total = videos.reduce((sum, item) => sum + (item.bytes || 0), 0);
+    $("videoHint").textContent = `已选 ${videos.length} 段视频${total ? `，共 ${formatBytes(total)}` : ""}；开始重建时自动抽帧。`;
+  }
+  $("sourceHint").textContent = state.sourcePath
+    ? ""
+    : (videos.length
+      ? "可选：再加一个图片文件夹，与视频一起重建。"
+      : "支持 JPG / PNG / WEBP / HEIC / TIFF，至少 2 张。");
 }
 
 /** Viewer URL, carrying the reconstruction-derived pose, upright basis and scale. */
@@ -556,15 +584,48 @@ $("pickFolder").onclick = async () => {
 
 $("formSource").oninput = (event) => { state.sourcePath = event.target.value; };
 
+$("pickVideos").onclick = async () => {
+  $("videoHint").textContent = "等待视频选择…";
+  try {
+    const chosen = await api("/api/dialog/files", {
+      method: "POST",
+      body: JSON.stringify({ title: "选择房屋视频", filter: "视频文件|*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.3gp|所有文件|*.*" }),
+    });
+    if (!chosen) {
+      renderForm();
+      return;
+    }
+    // Merge: re-picking adds to the list instead of replacing it.
+    const known = new Map(state.videoPaths.map((item) => [item.path.toLowerCase(), item]));
+    for (const item of chosen.items) known.set(item.path.toLowerCase(), item);
+    state.videoPaths = [...known.values()];
+    renderForm();
+  } catch (error) {
+    $("videoHint").textContent = `无法打开文件对话框（${error.message}），可先把视频放进一个文件夹再用图片入口。`;
+  }
+};
+
+$("clearVideos").onclick = () => { state.videoPaths = []; renderForm(); };
+
+$("formFrameTarget").onchange = (event) => { state.frameTarget = Number(event.target.value) || 0; };
+
 $("createProject").onclick = async () => {
   $("formError").textContent = "";
   if (!state.formPreset) { $("formError").textContent = "请选择训练档位"; return; }
+  const folder = $("formSource").value.trim();
+  const videos = state.videoPaths;
+  if (!folder && !videos.length) {
+    $("formError").textContent = "请选择图片文件夹，或至少一个视频文件";
+    return;
+  }
   try {
     const created = await api("/api/projects", {
       method: "POST",
       body: JSON.stringify({
         name: $("formName").value,
-        sourceDir: $("formSource").value,
+        ...(folder ? { sourceDir: folder } : {}),
+        ...(videos.length ? { videoPaths: videos.map((item) => item.path) } : {}),
+        videoFrameTarget: state.frameTarget ?? 0,
         trainingPreset: state.formPreset,
         useGpu: $("formGpu").checked,
         cameraModel: $("formCamera").value,
@@ -572,6 +633,7 @@ $("createProject").onclick = async () => {
         featurePreset: $("formFeatures").value,
       }),
     });
+    state.videoPaths = [];
     await loadProjects();
     await openProject(created.id);
   } catch (error) {

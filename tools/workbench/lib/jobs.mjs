@@ -563,6 +563,9 @@ async function run(job, project, options) {
       if (step.verify) {
         const check = step.verify(job.scopeProject);
         if (!check.ok) {
+          // The code lets the UI separate "your video is unreadable" from "your
+          // machine lacks ffmpeg"; the message alone is too easy to misread.
+          record.errorCode = check.code ?? null;
           halt(job, project, i, `「${step.name}」校验失败：${check.message}`);
           return;
         }

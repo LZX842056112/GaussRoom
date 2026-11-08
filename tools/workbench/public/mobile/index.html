@@ -93,6 +93,15 @@
     <details id="captureMapPanel" class="capture-map-panel"><summary>查看采集位置估计</summary><p class="footnote">此图使用已上传照片估计相机位置和稀疏点。尺度未实测。此图不表示表面覆盖率，也不显示当前手机位置。</p><p id="analysisStatus" role="status" class="section-description">首批需要 20 张照片。之后每新增 12 张照片更新，更新间隔至少 15 秒。</p><div class="auto-controls"><button id="analyzeCapture" class="secondary" type="button">更新位置估计</button><button id="cancelAnalysis" class="secondary" type="button">停止分析</button><button id="fitCaptureMap" class="secondary" type="button">适合视图</button></div><div id="captureMap" aria-label="已上传照片的相机位置估计"></div><p id="captureMapCounts" class="footnote"></p><img id="mapThumbnail" alt="选中相机的照片缩略图" hidden><p id="mapSelection" class="footnote"></p><details class="help"><summary>未定位的照片</summary><ul id="unlocalizedPhotos"></ul></details><details class="help"><summary>可能重复的照片</summary><ul id="suspectedDuplicates"></ul></details></details>
     <div class="card-footer"><button id="commit" class="primary full">提交照片并创建项目</button><p class="footnote">照片就绪后创建项目，再开始重建。</p></div>
   </section>
+  <section id="videoSection" class="card" hidden>
+    <div class="section-heading"><div><p class="eyebrow">视频重建</p><h2 id="videoTitle">视频重建</h2></div><span class="section-icon">02</span></div>
+    <p id="videoHint" class="section-description"></p>
+    <p id="videoStatus" role="status" aria-live="polite" class="attention-note"></p>
+    <label class="capture-button album-button"><svg viewBox="0 0 24 24" fill="none" aria-hidden="true"><rect x="2" y="6" width="13" height="12" rx="2"/><path d="m15 11 7-4v10l-7-4"/></svg><span>选择视频并上传<small>MP4 / MOV</small></span><input id="videoPick" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.m4v" multiple></label>
+    <ul id="videoList" class="video-list" aria-label="视频列表"></ul>
+    <div class="auto-controls"><button id="videoCommit" class="primary" type="button" hidden>提交并创建项目</button><button id="videoNew" class="secondary" type="button" hidden>新建视频批次</button><button id="videoClear" class="secondary" type="button" hidden>删除批次</button></div>
+    <p class="footnote">视频原样上传到电脑后抽帧，不在手机上压缩。电脑按走动速度挑选清晰、间隔均匀的帧，再与照片一起重建。上传中断后，重新选择文件名和大小都相同的原文件，会从已上传的位置继续；不想续传也可以点「移除」删掉这段。</p>
+  </section>
   <section id="projectSection" class="card" hidden>
     <div class="section-heading"><div><p class="eyebrow">电脑增强</p><h2>重建与漫游</h2></div><span class="section-icon">03</span></div>
     <p id="projectInfo" class="section-description"></p>

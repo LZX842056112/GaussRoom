@@ -4,7 +4,7 @@ import {
   cpSync, copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync,realpathSync,
 } from "node:fs";
 import { randomBytes } from "node:crypto";
-import { resolve,sep } from "node:path";
+import { basename, resolve,sep } from "node:path";
 import { PROJECTS_DIR, WORKBENCH } from "./paths.mjs";
 import {
   CAMERA_MODELS, FEATURE_PRESETS, STEP_ORDER, TRAINING_PRESETS, dirs, geometrySignature, globalProgress, readGate, sparseModels,
@@ -16,6 +16,11 @@ import { endStepTiming, preserveStepTiming, projectTiming, stepTiming } from './
 
 const ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
 const IMAGE_SUFFIXES = new Set([".jpg", ".jpeg", ".png", ".webp", ".heic", ".heif", ".tif", ".tiff", ".bmp"]);
+// Containers a phone or camera can hand us directly. Decoding happens in
+// video_frames.py; this list only guards the project record.
+export const VIDEO_SUFFIXES = new Set([".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".3gp"]);
+const MAX_VIDEO_BYTES = 8 * 1024 * 1024 * 1024;
+const MAX_VIDEO_TARGET_FRAMES = 2000;
 
 export function ensureStore() {
   mkdirSync(PROJECTS_DIR, { recursive: true });
@@ -115,7 +120,7 @@ function markPendingFrom(project, stepId) {
   }
 }
 
-const PATCHABLE = ["useGpu", "cameraModel", "featurePreset", "trainingPreset", "selectedModel", "mapper"];
+const PATCHABLE = ["useGpu", "cameraModel", "featurePreset", "trainingPreset", "selectedModel", "mapper", "videoFrameTarget"];
 
 export function update(id, patch) {
   const project = read(id);
@@ -179,6 +184,16 @@ export function update(id, patch) {
         );
       }
       project.selectedModel = patch.selectedModel;
+    } else if (key === "videoFrameTarget") {
+      const next = Number(patch.videoFrameTarget);
+      if (!Number.isInteger(next) || next < 0 || next > MAX_VIDEO_TARGET_FRAMES) {
+        throw Object.assign(new Error(`目标帧数需为 0（自动）到 ${MAX_VIDEO_TARGET_FRAMES} 之间的整数`), { code: 400 });
+      }
+      if (next !== (project.videoFrameTarget ?? 0)) {
+        project.videoFrameTarget = next;
+        // Frame counts feed prepare only, so nothing downstream survives.
+        markPendingFrom(project, "prepare");
+      }
     } else if (key === "mapper") {
       if (!["incremental", "global"].includes(patch.mapper)) {
         throw Object.assign(new Error(`未知重建方式：${patch.mapper}`), { code: 400 });
@@ -223,12 +238,17 @@ export function list() {
 }
 
 export function summarise(project, now = Date.now()) {
+  const videos = project.videoSources ?? [];
   return {
     id: project.id,
     name: project.name,
     state: project.state,
     sourceDir: project.sourceDir,
     sourceImageCount: project.sourceImageCount,
+    photoSourceCount: project.photoSources?.length ?? (project.sourceDir ? 1 : 0),
+    videoCount: videos.length,
+    videos: videos.map(({ name, bytes }) => ({ name, bytes })),
+    videoFrameTarget: project.videoFrameTarget ?? 0,
     inputKind: project.inputKind ?? 'photos',
     capture: project.capture ? {format:project.capture.format,scanId:project.capture.scanId,manifestSha256:project.capture.manifestSha256} : null,
     scaleSource: project.inputKind === 'arkit_scan' ? 'lidar' : 'unmeasured',
@@ -248,7 +268,7 @@ export function summarise(project, now = Date.now()) {
     timing: projectTiming(project, now),
     steps: project.steps.map((step) => ({
       id:step.id, name:step.name, status:step.status, progress:step.progress ?? 0,
-      error:step.error ?? null, note:step.note ?? null,
+      error:step.error ?? null, note:step.note ?? null, errorCode:step.errorCode ?? null,
       startedAt:step.startedAt ?? null, endedAt:step.endedAt ?? null, timing:stepTiming(step, now),
     })),
     gate: readGate(project),
@@ -278,19 +298,72 @@ export function countImages(folder) {
   }
 }
 
-export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental", featurePreset = "standard" }, {id:allocatedId} = {}) {
+/** Validate video inputs without decoding them; decoding is prepare's job. */
+function resolveVideoSources(videoPaths) {
+  const list = [], seen = new Set();
+  for (const raw of Array.isArray(videoPaths) ? videoPaths : []) {
+    if (typeof raw !== "string" || !raw.trim()) continue;
+    const path = resolve(raw.trim());
+    // Windows compares paths case-insensitively; de-duplicating by the real
+    // spelling keeps the manifest stable across requests.
+    if (seen.has(path.toLowerCase())) continue;
+    let stats;
+    try {
+      stats = statSync(path);
+    } catch {
+      throw Object.assign(new Error(`视频文件不存在：${path}`), { code: 400 });
+    }
+    if (!stats.isFile()) throw Object.assign(new Error(`不是视频文件：${path}`), { code: 400 });
+    const suffix = path.slice(path.lastIndexOf(".")).toLowerCase();
+    if (!VIDEO_SUFFIXES.has(suffix)) {
+      throw Object.assign(
+        new Error(`不支持的视频格式：${suffix || path}。支持 ${[...VIDEO_SUFFIXES].join("、")}`),
+        { code: 400 },
+      );
+    }
+    if (stats.size === 0) throw Object.assign(new Error(`视频文件为空：${path}`), { code: 400 });
+    if (stats.size > MAX_VIDEO_BYTES) throw Object.assign(new Error(`视频文件超过 8 GB：${path}`), { code: 400 });
+    seen.add(path.toLowerCase());
+    list.push({ path, name: basename(path), bytes: stats.size });
+  }
+  return list;
+}
+
+function resolvePhotoFolders(sourceDir, photoSources) {
+  const folders = [];
+  for (const value of [...(Array.isArray(photoSources) ? photoSources : []), sourceDir]) {
+    if (typeof value !== "string" || !value.trim()) continue;
+    const folder = resolve(value.trim());
+    if (!folders.some((existing) => existing.toLowerCase() === folder.toLowerCase())) folders.push(folder);
+  }
+  return folders;
+}
+
+export function create({
+  name, sourceDir, photoSources, videoPaths, videoFrameTarget = 0,
+  trainingPreset, useGpu = true, cameraModel = "SIMPLE_RADIAL", mapper = "incremental", featurePreset = "standard",
+}, {id:allocatedId} = {}) {
   ensureStore();
   const label = String(name ?? "").trim();
   if (!label) throw Object.assign(new Error("请填写项目名称"), { code: 400 });
-  const source = String(sourceDir ?? "").trim();
-  if (!source) throw Object.assign(new Error("请选择或填写图片文件夹路径"), { code: 400 });
-  const resolved = resolve(source);
-  if (!existsSync(resolved) || !statSync(resolved).isDirectory()) {
-    throw Object.assign(new Error(`图片文件夹不存在：${resolved}`), { code: 400 });
+  const folders = resolvePhotoFolders(sourceDir, photoSources);
+  for (const folder of folders) {
+    if (!existsSync(folder) || !statSync(folder).isDirectory()) {
+      throw Object.assign(new Error(`图片文件夹不存在：${folder}`), { code: 400 });
+    }
   }
-  const found = countImages(resolved);
-  if (found < 2) {
+  const videos = resolveVideoSources(videoPaths);
+  // Videos alone are a complete input; photos alone keep the original floor of two.
+  if (!folders.length && !videos.length) {
+    throw Object.assign(new Error("请填写图片文件夹路径，或选择至少一个视频文件"), { code: 400 });
+  }
+  const found = folders.reduce((total, folder) => total + countImages(folder), 0);
+  if (!videos.length && found < 2) {
     throw Object.assign(new Error(`该文件夹内只有 ${found} 张可用图片，至少需要 2 张`), { code: 400 });
+  }
+  const targetFrames = Number(videoFrameTarget ?? 0);
+  if (!Number.isInteger(targetFrames) || targetFrames < 0 || targetFrames > MAX_VIDEO_TARGET_FRAMES) {
+    throw Object.assign(new Error(`目标帧数需为 0（自动）到 ${MAX_VIDEO_TARGET_FRAMES} 之间的整数`), { code: 400 });
   }
   if (!TRAINING_PRESETS[trainingPreset]) {
     throw Object.assign(new Error("请选择训练档位"), { code: 400 });
@@ -308,9 +381,12 @@ export function create({ name, sourceDir, trainingPreset, useGpu = true, cameraM
   const project = {
     id,
     name: label,
-    sourceDir: resolved,
+    sourceDir: folders[0] ?? "",
     sourceImageCount: found,
-    inputKind: 'photos',
+    photoSources: folders,
+    videoSources: videos,
+    videoFrameTarget: targetFrames,
+    inputKind: videos.length ? 'video' : 'photos',
     createdAt: now,
     updatedAt: now,
     state: "idle",
@@ -450,6 +526,27 @@ export function pickFolder(title = "选择图片文件夹") {
       if (chosen) return done(chosen);
       if (code === 0) return done(null);          // user cancelled
       fail(new Error(err.trim() || `文件夹对话框退出码 ${code}`));
+    });
+  });
+}
+
+/** Multi-select file picker; resolves to an array of paths (empty when cancelled). */
+export function pickFiles(title = "选择视频文件", filter = "视频文件|*.mp4;*.mov;*.m4v;*.mkv;*.avi;*.webm;*.3gp|所有文件|*.*") {
+  return new Promise((done, fail) => {
+    const script = resolve(WORKBENCH, "scripts", "file-dialog.ps1");
+    const child = spawn("powershell", [
+      "-Sta", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script, "-Title", title, "-Filter", filter,
+    ], { windowsHide: true });
+    let out = "";
+    let err = "";
+    child.stdout.on("data", (chunk) => { out += chunk; });
+    child.stderr.on("data", (chunk) => { err += chunk; });
+    child.on("error", fail);
+    child.on("close", (code) => {
+      const paths = out.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+      if (paths.length) return done(paths);
+      if (code === 0) return done([]);            // user cancelled
+      fail(new Error(err.trim() || `文件对话框退出码 ${code}`));
     });
   });
 }

@@ -6,7 +6,7 @@ import { PY_DIR, PROJECTS_DIR, TOOLS } from "./paths.mjs";
 import { artifactDirs } from './artifact-paths.mjs';
 
 export const STEP_ORDER = [
-  { id: "prepare", name: "照片预处理" },
+  { id: "prepare", name: "素材预处理" },
   { id: "features", name: "特征提取" },
   { id: "match", name: "特征匹配" },
   { id: "sparse", name: "稀疏重建" },
@@ -23,7 +23,8 @@ export const STEP_WEIGHTS = {
 // Hard ceilings so a hung child cannot hold the single job slot forever.
 // Roughly 2-3x the observed runtime for the largest dataset tested here.
 export const STEP_TIMEOUT_MS = {
-  prepare: 15 * 60_000,
+  // Prepare now decodes whole videos, so it needs more headroom than photos did.
+  prepare: 45 * 60_000,
   features: 30 * 60_000,
   match: 120 * 60_000,
   sparse: 60 * 60_000,
@@ -50,6 +51,24 @@ export const TRAINING_PRESETS = {
 
 export function dirs(project,options={}) { return artifactDirs(project,options); }
 
+/** Video inputs in the order the user supplied them; entries may be paths or records. */
+export function videoSources(project) {
+  return (project.videoSources ?? [])
+    .map((item) => (typeof item === "string" ? item : item?.path))
+    .filter((path) => typeof path === "string" && path.length > 0);
+}
+
+/** Photo folders a prepare run consumes; video projects may legitimately have none. */
+export function photoSources(project) {
+  if (Array.isArray(project.photoSources)) return project.photoSources.filter(Boolean);
+  return project.sourceDir ? [project.sourceDir] : [];
+}
+
+/** Frame cache lives beside the project, not inside an attempt, so it survives retries. */
+export function frameCacheDir(project) {
+  return resolve(dirs(project, { attemptId: null }).root, "video-frames");
+}
+
 /** Original captures stay immutable while attempts get their own work images. */
 function captureRoot(project) {
   const capture = project.capture;
@@ -67,9 +86,10 @@ function captureRoot(project) {
 export function manifestSummary(project) {
   try {
     const manifest = JSON.parse(readFileSync(dirs(project).manifest, "utf8"));
-    return { retained: manifest.retained_count, groups: manifest.camera_groups };
+    return { retained: manifest.retained_count, groups: manifest.camera_groups,
+      videos: manifest.videos ?? [], error: manifest.error ?? null };
   } catch {
-    return { retained: 0, groups: {} };
+    return { retained: 0, groups: {}, videos: [], error: null };
   }
 }
 
@@ -181,22 +201,45 @@ export function buildSteps() {
   return [
     {
       id: "prepare",
-      name: "照片预处理",
+      name: "素材预处理",
+      // The video frame cache deliberately lives outside the attempt workspace
+      // (see frameCacheDir), so re-preparing an attempt reuses decoded frames.
       clean: (d) => [d.images, resolve(d.workspace, "contact-sheets"), d.manifest],
-      command: (project) => ({
-        cmd: TOOLS.python,
-        args: [
+      command: (project) => {
+        const folders = photoSources(project);
+        const videos = videoSources(project);
+        const args = [
           resolve(PY_DIR, "prepare_project.py"),
-          ...(project.photoSources??[project.sourceDir]).flatMap(path=>['--source',path]),
+          ...folders.flatMap((path) => ["--source", path]),
+          ...videos.flatMap((path) => ["--video", path]),
           "--project", dirs(project).workspace,
           "--images-relative", project.activeAttemptId ? "inputs/images" : "images",
           "--long-edge", "2048",
           "--min-long-edge", "1000",
-          "--ffmpeg", TOOLS.ffmpeg,
-        ],
-      }),
+          "--project-root", dirs(project, { attemptId: null }).root,
+          "--frame-cache", frameCacheDir(project),
+          "--target-frames", String(project.videoFrameTarget ?? 0),
+        ];
+        // An empty FFMPEG config must be omitted: argparse would read "" as a path.
+        if (TOOLS.ffmpeg) args.push("--ffmpeg", TOOLS.ffmpeg);
+        return { cmd: TOOLS.python, args };
+      },
+      // video_frames.py emits two monotone signals, one file at a time:
+      // "解码视频 i/n" means i-1 of n are done, "视频完成 i/n" means i of n.
+      progress: (line) => {
+        const done = /视频完成\s+(\d+)\/(\d+)/.exec(line);
+        if (done) return Number(done[1]) / Number(done[2]);
+        const started = /解码视频\s+(\d+)\/(\d+)/.exec(line);
+        return started ? (Number(started[1]) - 1) / Number(started[2]) : null;
+      },
       verify: (project) => {
         const summary = manifestSummary(project);
+        // Content failures (unreadable video, everything blurred, HDR without a
+        // usable decoder) arrive here instead of as a non-zero exit, so the user
+        // gets the actionable message rather than "退出码 3".
+        if (summary.error?.message) {
+          return { ok: false, message: summary.error.message, code: summary.error.code ?? null };
+        }
         return summary.retained >= 2
           ? { ok: true }
           : { ok: false, message: `预处理后可用图像仅 ${summary.retained} 张` };

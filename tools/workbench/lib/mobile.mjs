@@ -11,16 +11,40 @@ import { readJson, sendJson, streamFile } from './http.mjs';
 import * as defaultProjects from './projects.mjs';
 import * as defaultJobs from './jobs.mjs';
 import {createPhotoSessions} from './photo-sessions.mjs';
+import {createVideoSessions} from './video-sessions.mjs';
+import {videoCapabilities} from './video-tools.mjs';
 import {validatePhotoFile,getPhotoFormats} from './photo-validator.mjs';
 import {ensureMobileCertificates,needsCertificateRenewal} from './mobile-tls.mjs';
 
 const base='/api/mobile/v1', maxChunk=8*1024*1024, maxArchive=20*1024*1024*1024;
+// The phone never receives the raw `errorCode`; it gets an actionable sentence.
+// Deployment codes point at the computer, material codes at the footage.
+const FAILURE_COPY={
+ ffmpeg_missing:'电脑未配置 ffmpeg。请在电脑工作台的 .env 填写 FFMPEG 路径后重试。',
+ ffprobe_missing:'电脑的 ffmpeg 缺少 ffprobe，请换用完整版 ffmpeg 后重试。',
+ ffmpeg_probe_failed:'无法确认电脑的解码能力，请重试；若反复出现，检查 ffmpeg 安装。',
+ hdr_requires_ffmpeg:'这段视频是 HDR，但电脑缺少 HDR→SDR 转换能力。请换用完整版 ffmpeg，或在手机「设置 → 相机 → 格式」改为「兼容性最佳」后重录。',
+ probe_timeout:'读取视频信息超时，请重试；若反复出现，检查文件是否在网络盘或被其他程序占用。',
+ decode_timeout:'视频解码超时，请重试；若反复出现，检查电脑负载或文件位置。',
+ internal_error:'电脑处理视频时发生内部错误，请稍后重试；若反复出现，请在电脑工作台查看日志。',
+ video_too_short:'视频太短，请录制 10 秒以上的片段后重试。',
+ video_too_long:'视频超过单段 10 分钟上限，请分段拍摄后重试。',
+ source_long_edge_below_1000:'视频分辨率太低，请用 1080p 或更高画质重录。',
+ hdr_unverified:'这段视频是 10bit 且缺少色彩标记，请导出成 H.264 8bit MP4 后再上传。',
+ decode_failed:'视频无法解码，文件可能已损坏。请重新录制或换一个文件。',
+ unsupported_container:'不支持这个视频格式，请使用系统相机录制的 MP4/MOV。',
+ insufficient_usable_frames:'视频里没有可用画面，请放慢移动速度、增加照明后重新录制。',
+ insufficient_media:'可用画面不足 2 张，请录得更长一些并放慢移动速度。',
+ no_usable_media:'没有找到可用的图片或视频，请重新选择素材。',
+ source_missing:'源视频文件已丢失，请重新上传素材。',
+ no_input:'还没有选择任何图片或视频，请先添加素材。',
+};
 const bad=(message,code=400)=>Object.assign(new Error(message),{code});
 const hash=(value)=>createHash('sha256').update(value).digest('hex');
 const digestFile=async path=>{const h=createHash('sha256'); for await(const chunk of createReadStream(path))h.update(chunk); return h.digest('hex');};
 const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const allowedAssets=new Set(['/viewer.html','/touch-controls.mjs','/render-limits.mjs','/vendor/three/build/three.module.js','/vendor/three/build/three.core.js','/vendor/three/examples/jsm/postprocessing/Pass.js','/vendor/spark.module.js']);
-const publicMobileAssets=new Map([['/mobile/','mobile/index.html'],['/mobile/app.js','mobile/app.js'],['/mobile/style.css','mobile/style.css'],['/mobile/state.mjs','mobile/state.mjs'],['/mobile/capture.mjs','mobile/capture.mjs'],['/mobile/capture-map.mjs','mobile/capture-map.mjs'],['/mobile/direction-guide.mjs','mobile/direction-guide.mjs'],['/mobile/capture-guidance.mjs','mobile/capture-guidance.mjs']]);
+const publicMobileAssets=new Map([['/mobile/','mobile/index.html'],['/mobile/app.js','mobile/app.js'],['/mobile/style.css','mobile/style.css'],['/mobile/state.mjs','mobile/state.mjs'],['/mobile/capture.mjs','mobile/capture.mjs'],['/mobile/capture-map.mjs','mobile/capture-map.mjs'],['/mobile/direction-guide.mjs','mobile/direction-guide.mjs'],['/mobile/capture-guidance.mjs','mobile/capture-guidance.mjs'],['/mobile/video.mjs','mobile/video.mjs']]);
 function privateAddress(address='') { const a=address.replace(/^::ffff:/,''); return a==='::1'||a==='127.0.0.1'||/^10\./.test(a)||/^192\.168\./.test(a)||/^172\.(1[6-9]|2\d|3[01])\./.test(a)||/^169\.254\./.test(a)||/^fe80:/i.test(a)||/^f[cd][0-9a-f]{2}:/i.test(a); }
 async function validateArchive(archive,output) {
  return await new Promise((ok,fail)=>{let stdout='',stderr='';const child=spawn(TOOLS.python,[resolve(PY_DIR,'scan_archive.py'),'--archive',archive,'--output',output],{windowsHide:true});child.stdout.on('data',x=>stdout+=x);child.stderr.on('data',x=>stderr+=x);child.on('error',fail);child.on('close',code=>{if(code!==0)return fail(bad('扫描包校验失败',400));try{ok(JSON.parse(stdout));}catch{fail(bad('校验器输出无效',500));}});});
@@ -62,10 +86,14 @@ export function createMobileGateway({stateRoot=resolve(PROJECTS_DIR,'.mobile'), 
  }
  async function offlineImport(path){if(typeof path!=='string'||!statSync(path).isFile())throw bad('扫描包路径无效');const copy=join(stateRoot,`offline-${randomUUID()}.zip`);try{copyFileSync(resolve(path),copy);return {projectId:await importArchive(copy,null,await digestFile(copy))};}finally{rmSync(copy,{force:true});}}
  const authorize=(req,allowCookie)=>{let token=/^Bearer ([A-Za-z0-9_-]+)$/.exec(req.headers.authorization??'')?.[1];if(!token&&allowCookie)token=/(?:^|;\s*)gr_session=([A-Za-z0-9_-]+)/.exec(req.headers.cookie??'')?.[1];if(!token)throw bad('需要配对',401);const digest=hash(token);const entry=Object.entries(state.devices).find(([,d])=>d.tokenHash===digest);if(!entry)throw bad('设备未授权',401);return entry[0];};
- const visibleProject=(id,device)=>{const entry=Object.values(state.scans).find(x=>x.projectId===id);if((!entry&&!photos.ownsProject(id))||!state.devices[device]?.projects?.includes(id))throw bad('项目不存在',404);return projectStore.read(id);};
+ const visibleProject=(id,device)=>{const entry=Object.values(state.scans).find(x=>x.projectId===id);if((!entry&&!photos.ownsProject(id)&&!videos.ownsProject(id))||!state.devices[device]?.projects?.includes(id))throw bad('项目不存在',404);return projectStore.read(id);};
  const grant=(device,id)=>{const d=state.devices[device];d.projects??=[];if(d.projects.includes(id))return;d.projects.push(id);persist();};
  const revokeProject=(device,id)=>{const d=state.devices[device];if(!d)return;d.projects=(d.projects??[]).filter(p=>p!==id);persist();};
  const photos=createPhotoSessions({root:join(stateRoot,'photos'),projectStore,jobStore,validatePhoto:photoValidator,getCapabilities:photoCapabilities,grantProject:grant,revokeProject,isDeviceActive:id=>!!state.devices[id],analysisRun});
+ const videos=createVideoSessions({root:join(stateRoot,'videos'),projectStore,jobStore,grantProject:grant,revokeProject,isDeviceActive:id=>!!state.devices[id]});
+ // A handoff ticket may carry either kind of batch id. Keep the photo check
+ // first so the existing photo flow is byte-for-byte unchanged.
+ const ownsAnySession=(id,device)=>{try{photos.ownsSession(id,device);return true;}catch{return videos.ownsSession(id,device);}};
  async function handle(req,res){try{
   if(!privateAddress(req.socket.remoteAddress))throw bad('仅允许私有网络',403);
   const url=new URL(req.url,'http://localhost'),path=url.pathname,method=req.method,epoch=lifecycle;
@@ -82,21 +110,22 @@ export function createMobileGateway({stateRoot=resolve(PROJECTS_DIR,'.mobile'), 
     const b=await readJson(req);checkConnection();if(!b||typeof b.ticket!=='string'||!/^[A-Za-z0-9_-]{43}$/.test(b.ticket)||Object.keys(b).some(k=>k!=='ticket'))throw bad('交接码无效',403);
     const key=hash(b.ticket),entry=handoffs.get(key);handoffs.delete(key);if(!entry||clock()>=entry.expires)throw bad('交接码无效或已过期',403);
     if(!state.devices[entry.deviceId]||state.devices[entry.deviceId].tokenHash!==hash(entry.token))throw bad('设备未授权',401);
-    if(entry.batchId)photos.ownsSession(entry.batchId,entry.deviceId);sendJson(res,200,{token:entry.token,deviceId:entry.deviceId,...(entry.batchId?{batchId:entry.batchId}:{})});return;
+    if(entry.batchId)ownsAnySession(entry.batchId,entry.deviceId);sendJson(res,200,{token:entry.token,deviceId:entry.deviceId,...(entry.batchId?{batchId:entry.batchId}:{})});return;
   }
   if(path===base+'/pair'&&method==='POST') {const ip=req.socket.remoteAddress,now=Date.now(),history=(attempts.get(ip)??[]).filter(t=>now-t<60000);if(history.length>=8)throw bad('配对次数过多',429);history.push(now);attempts.set(ip,history);const body=await readJson(req);if(!code||Date.now()>=expires||body.code!==code||typeof body.deviceName!=='string'||!body.deviceName.trim()||body.deviceName.length>100)throw bad('配对码无效或已过期',403);const token=randomBytes(32).toString('base64url'),deviceId=randomUUID();state.devices[deviceId]={deviceName:body.deviceName.trim(),tokenHash:hash(token),projects:[]};try{persist();}catch(error){delete state.devices[deviceId];throw error;}code=null;sendJson(res,200,{token,deviceId});return;}
   const readOnly=method==='GET'||method==='HEAD',device=authorize(req,readOnly);
   const reauthorize=()=>{checkConnection();if(authorize(req,readOnly)!==device)throw bad('设备未授权',401);};
   if(path===base+'/https-handoff'&&method==='POST'){
     const b=await readJson(req);reauthorize();if(!httpsServer||!certificate)throw bad('请先在电脑启用 HTTPS',409);
-    if(!b||Object.keys(b).some(k=>k!=='batchId')||(b.batchId!==undefined&&(typeof b.batchId!=='string'||!uuid.test(b.batchId))))throw bad('交接参数无效');if(b.batchId)photos.ownsSession(b.batchId,device);
+    if(!b||Object.keys(b).some(k=>k!=='batchId')||(b.batchId!==undefined&&(typeof b.batchId!=='string'||!uuid.test(b.batchId))))throw bad('交接参数无效');if(b.batchId)ownsAnySession(b.batchId,device);
     let host;try{const target=new URL('http://'+req.headers.host);host=target.hostname;if(target.username||target.password||target.pathname!=='/'||(host!=='localhost'&&(isIP(host)!==4||!privateAddress(host))))throw Error();}catch{throw bad('请使用电脑局域网 IP 地址',400);}
     if(host!=='localhost'&&!certificate.addresses.includes(host))throw bad('电脑 IP 已变化。请在电脑重新启用 HTTPS',409);
     for(const [key,value]of handoffs)if(value.expires<=clock()||value.deviceId===device)handoffs.delete(key);
     const ticket=randomBytes(32).toString('base64url');handoffs.set(hash(ticket),{deviceId:device,token:/^Bearer (.+)$/.exec(req.headers.authorization)[1],batchId:b.batchId,expires:clock()+60000});
     sendJson(res,200,{url:`https://${host}:${httpsServer.address().port}/mobile/#handoff=${ticket}`,expiresIn:60});return;
   }
-  if(readOnly&&path===base+'/capabilities'){const cap=await photos.capabilities();reauthorize();sendJson(res,200,{...cap,deviceId:device});return;}
+  if(readOnly&&path===base+'/capabilities'){const cap=await photos.capabilities();const video=videoCapabilities();reauthorize();sendJson(res,200,{...cap,...videos.capabilities(),video:{canUpload:video.canIngestVideo,message:video.message,tonemap:video.tonemap.ok,tonemapUnknown:video.tonemap.unknown===true},deviceId:device});return;}
+  if(await videos.handle(req,res,path,device,reauthorize))return;
   if(await photos.handle(req,res,path,device,reauthorize))return;
   if(path===base+'/session'&&method==='POST'){const token=/^Bearer (.+)$/.exec(req.headers.authorization)[1];res.setHeader('Set-Cookie',`gr_session=${token}; HttpOnly; SameSite=Strict; Path=/${req.socket.encrypted?'; Secure':''}`);sendJson(res,200,{ok:true});return;}
   if(readOnly&&allowedAssets.has(path)){streamFile(res,resolve(PUBLIC_DIR,'.'+path),{head:method==='HEAD'});return;}
@@ -106,11 +135,17 @@ export function createMobileGateway({stateRoot=resolve(PROJECTS_DIR,'.mobile'), 
    if(method==='POST'&&match[2]){await exclusive(id,async()=>{const u=owned(id,device);if(u.projectId){sendJson(res,200,{projectId:u.projectId});return;}if(u.offset!==u.bytes)throw bad('上传尚未完成',409);if(await digestFile(data(id))!==u.sha256)throw bad('扫描包哈希不匹配');const check=()=>{reauthorize();owned(id,device);};check();u.projectId=await importArchive(data(id),u.scanId,u.sha256,check);check();grant(device,u.projectId);save(metadata(id),u);sendJson(res,200,{projectId:u.projectId});});return;}}
   const p=path.match(/^\/api\/mobile\/v1\/projects\/([^/]+)(?:\/(run|scene\.ply))?$/);if(p){const project=visibleProject(p[1],device);if(readOnly&&p[2]==='scene.ply'){const scene=projectStore.latestExport(project);if(!scene)throw bad('场景不存在',404);streamFile(res,scene.path,{head:method==='HEAD'});return;}
    if(method==='POST'&&p[2]==='run'){const b=await readJson(req);if(!['fast','standard','full'].includes(b.trainingPreset)||Object.keys(b).some(k=>k!=='trainingPreset'))throw bad('训练档位无效');reauthorize();visibleProject(p[1],device);if(jobStore.anyRunning())throw bad('已有作业运行',409);const warning=jobStore.trainCleanWarning(project,b);if(warning)throw bad(warning.message,409);const job=jobStore.start(project.id,b,jobRuntime);sendJson(res,202,{jobId:job.id});return;}
-   if(readOnly&&!p[2]){const s=projectStore.summarise(jobStore.liveProject(project.id)??project),out={};for(const k of ['id','name','state','progress','timing','quality'])out[k]=s[k];out.steps=(s.steps??[]).map(({id,name,status,progress,startedAt,endedAt,timing})=>({id,name,status,progress,startedAt,endedAt,timing}));out.lastError=s.lastError?'作业失败。请在工作台查看详情。':null;out.scene=null;if(s.scene){const pose=s.scene.home,params=new URLSearchParams({scene:`${base}/projects/${project.id}/scene.ply`});if(pose){params.set('home',[...pose.position,pose.yaw,pose.pitch].map(x=>x.toFixed(4)).join(','));if(pose.basis)params.set('basis',pose.basis.flat().map(x=>x.toFixed(5)).join(','));if(Number.isFinite(pose.extent)&&pose.extent>0)params.set('radius',pose.extent.toFixed(4));}out.scene={viewerUrl:`/viewer.html?${params}`};}sendJson(res,200,out);return;}}
+   if(readOnly&&!p[2]){const s=projectStore.summarise(jobStore.liveProject(project.id)??project),out={};for(const k of ['id','name','state','progress','timing','quality'])out[k]=s[k];out.steps=(s.steps??[]).map(({id,name,status,progress,startedAt,endedAt,timing,error,errorCode})=>({id,name,status,progress,startedAt,endedAt,timing,error:error??null,errorCode:errorCode??null}));out.lastErrorCode=(s.steps??[]).find(step=>step.errorCode)?.errorCode??null;out.lastError=s.lastError?(FAILURE_COPY[out.lastErrorCode]??'作业失败。请在工作台查看详情。'):null;out.scene=null;if(s.scene){const pose=s.scene.home,params=new URLSearchParams({scene:`${base}/projects/${project.id}/scene.ply`});if(pose){params.set('home',[...pose.position,pose.yaw,pose.pitch].map(x=>x.toFixed(4)).join(','));if(pose.basis)params.set('basis',pose.basis.flat().map(x=>x.toFixed(5)).join(','));if(Number.isFinite(pose.extent)&&pose.extent>0)params.set('radius',pose.extent.toFixed(4));}out.scene={viewerUrl:`/viewer.html?${params}`};}sendJson(res,200,out);return;}}
   throw bad('接口不存在',404);
- }catch(e){if(!res.headersSent)sendJson(res,Number.isInteger(e.code)?e.code:500,{error:Number.isInteger(e.code)?e.message:'网关内部错误'});else res.destroy();}}
+ }catch(e){if(!res.headersSent)sendJson(res,Number.isInteger(e.code)?e.code:500,{error:Number.isInteger(e.code)?e.message:'网关内部错误',...(Number.isInteger(e.offset)?{offset:e.offset}:{})});else res.destroy();}}
  async function enable({port=8124,host='0.0.0.0'}={}){if(server)return status();if(httpStarting)return httpStarting;const epoch=lifecycle;
-  httpStarting=(async()=>{const candidate=createServer(handle);await new Promise((ok,fail)=>{candidate.once('error',fail);candidate.listen(port,host,ok);});if(epoch!==lifecycle){await new Promise(ok=>candidate.close(ok));throw bad('手机连接已关闭',409);}server=candidate;code=String(randomInt(100000,1000000));expires=clock()+5*60*1000;return status();})();try{return await httpStarting;}finally{httpStarting=null;}
+  httpStarting=(async()=>{const candidate=createServer(handle);await new Promise((ok,fail)=>{candidate.once('error',fail);candidate.listen(port,host,ok);});if(epoch!==lifecycle){await new Promise(ok=>candidate.close(ok));throw bad('手机连接已关闭',409);}server=candidate;code=String(randomInt(100000,1000000));expires=clock()+5*60*1000;
+   // Warm the video capability probe while the user is still typing the pairing
+   // code: it can block this loop for up to 5 s on a cold antivirus scan. This
+   // only moves the block, it does not remove it - so the timeout stays short.
+   // try/catch is mandatory: a throwing timer callback would kill the gateway.
+   setTimeout(()=>{try{videoCapabilities();}catch{/* best effort */}},0);
+   return status();})();try{return await httpStarting;}finally{httpStarting=null;}
  }
  async function enableHttps({port=8125,host='0.0.0.0'}={}){
   if(httpsStarting)return httpsStarting;const epoch=lifecycle;
@@ -121,7 +156,7 @@ export function createMobileGateway({stateRoot=resolve(PROJECTS_DIR,'.mobile'), 
    }catch(e){httpsError=Number.isInteger(e.code)?e.message:'无法启用 HTTPS。请检查端口、电脑时间和证书目录权限。';throw bad(httpsError,Number.isInteger(e.code)?e.code:503);}})();try{return await httpsStarting;}finally{httpsStarting=null;}
  }
  async function disable(){lifecycle++;clearInterval(certificateTimer);certificateTimer=null;code=null;expires=0;handoffs.clear();const old=[server,httpsServer].filter(Boolean);server=null;httpsServer=null;
-  const closing=old.map(s=>{s.closeAllConnections();return new Promise(ok=>s.close(ok));});await Promise.allSettled([httpStarting,httpsStarting].filter(Boolean));await photos.close();await Promise.all(closing);
+  const closing=old.map(s=>{s.closeAllConnections();return new Promise(ok=>s.close(ok));});await Promise.allSettled([httpStarting,httpsStarting].filter(Boolean));await photos.close();await videos.close();await Promise.all(closing);
  }
  return {enable,enableHttps,disable,status,revoke,offlineImport};
 }

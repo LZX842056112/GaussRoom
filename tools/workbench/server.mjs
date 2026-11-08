@@ -16,6 +16,7 @@ import { listAttempts, readAttempt } from './lib/attempts.mjs';
 import { qualityFor, saveReview, evaluationFor } from './lib/quality.mjs';
 import {previewFactReuse,reuseFacts,importPhotos} from './lib/assistance-import.mjs';
 import {computeOwner} from './lib/compute-slot.mjs';
+import { videoCapabilities } from './lib/video-tools.mjs';
 
 export function createWorkbenchServer({getContext=defaultGetContext,jobRuntime={}}={}) {
 const router = createRouter();
@@ -49,6 +50,7 @@ router.get("/api/health", (request, response) => {
     diskFreeBytes: diskFreeBytes(),
     busyProject: jobs.busyId(),
     computeTask: computeOwner(),
+    video: videoCapabilities(),
   });
 });
 
@@ -71,6 +73,12 @@ router.get("/api/projects", (request, response) => {
 router.post("/api/projects", async (request, response) => {
   const body = await readJson(request);
   try {
+    // Video projects are only usable when ffmpeg+ffprobe are configured; refuse
+    // at creation time instead of failing hours later inside prepare.
+    if (Array.isArray(body?.videoPaths) && body.videoPaths.length) {
+      const video = videoCapabilities();
+      if (!video.canIngestVideo) throw Object.assign(new Error(video.message), { code: 409 });
+    }
     sendJson(response, 201, projects.summarise(projects.create(body)));
   } catch (error) {
     fail(response, error);
@@ -125,6 +133,24 @@ router.post("/api/dialog/folder", async (request, response) => {
       return;
     }
     sendJson(response, 200, { path: chosen, imageCount: projects.countImages(chosen) });
+  } catch (error) {
+    fail(response, error);
+  }
+});
+
+router.post("/api/dialog/files", async (request, response) => {
+  const body = await readJson(request);
+  try {
+    const chosen = await projects.pickFiles(body.title || "选择视频文件", body.filter || undefined);
+    // An empty array means the user cancelled; the UI treats 204 the same way.
+    if (!chosen.length) {
+      response.writeHead(204).end();
+      return;
+    }
+    sendJson(response, 200, {
+      paths: chosen,
+      items: chosen.map((path) => ({ path, name: path.split(/[\\/]/).pop() })),
+    });
   } catch (error) {
     fail(response, error);
   }
