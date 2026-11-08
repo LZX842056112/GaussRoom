@@ -2,9 +2,10 @@
 
 GaussRoom 是在 Windows 上运行的室内三维重建工作台。它使用照片或 iPhone LiDAR 扫描数据，调用 COLMAP 和 Brush，生成可以在浏览器中漫游的高斯场景。
 
-项目提供三种数据入口：
+项目提供四种数据入口：
 
 - **电脑照片**：选择本机照片文件夹，运行重建。
+- **房屋视频**：选择本机视频文件，或在手机网页上传；工作台自动抽帧后与照片一起重建（两类素材可混合）。
 - **手机照片网页**：iPhone 使用 Safari，安卓使用 Chrome。通过局域网上传照片，再由电脑重建。此方式无需安装 APP，也无需 Mac。
 - **iPhone LiDAR APP**：使用原生 APP 采集彩色网格和标定关键帧。网格可离线查看；高斯场景仍由电脑训练。APP 源码已提供，构建和设备验收需要 Mac。
 
@@ -18,7 +19,8 @@ GaussRoom 是在 Windows 上运行的室内三维重建工作台。它使用照�
 
 ## 功能概览
 
-- 串行执行照片预处理、特征提取、特征匹配、稀疏重建、几何门禁、去畸变和高斯训练。
+- 串行执行素材预处理、特征提取、特征匹配、稀疏重建、几何门禁、去畸变和高斯训练。
+- 支持上传房屋视频：按走动速度自动抽帧，过滤模糊、过曝与近重复画面，缓存可跨重建尝试复用。
 - 支持增量式和全局式照片重建，支持标准和增强特征档位。
 - 几何连接不足时等待用户补充。支持对应点、区域范围、局部位置修正和资料复用。
 - 使用独立重建尝试保存日志、数据库和模型。失败时保留历史模型。
@@ -41,7 +43,7 @@ GaussRoom 是在 Windows 上运行的室内三维重建工作台。它使用照�
 - uv 和 Python 3.13。Python 版本见 [.python-version](.python-version)，依赖见 [pyproject.toml](pyproject.toml) 和 [uv.lock](uv.lock)。
 - COLMAP 4.2.1。默认使用 CUDA 版本；选择 CPU 特征处理时使用单独配置的 CPU 版本。
 - Brush 0.3.0，以及能运行该构建的 GPU 和驱动。COLMAP 的 CPU 选项不等于 Brush 已支持纯 CPU 训练。
-- ffmpeg，可选。手机 HEIC/HEIF 上传只有在电脑通过实际解码探测后才开放。
+- ffmpeg 与 ffprobe。手机 HEIC/HEIF 上传与全部视频输入都依赖它们；视频需要完整发行包（含 `zscale`/`tonemap`，用于把手机 HDR 转成 SDR）。只用 JPEG 且不处理视频时可以留空。
 
 外部工具二进制不在 Git 仓库内。将匹配版本解压到以下位置，或在 `.env` 中配置其他路径：
 
@@ -80,11 +82,28 @@ node tools/workbench/server.mjs
 - `COLMAP_GPU`：CUDA 版 COLMAP 路径。
 - `COLMAP_CPU`：CPU 版 COLMAP 路径。
 - `BRUSH`：Brush 程序路径。
-- `FFMPEG`：可选 ffmpeg 路径。
+- `FFMPEG`：ffmpeg 路径；同目录需有 `ffprobe`（找不到时会再查 `PATH`）。视频与 HEIC 需要它。
 
 相对路径按仓库根目录解析。系统环境变量优先于 `.env`。配置不需要云服务密钥。`.env` 不提交到 Git。
 
 桌面服务只监听回环地址。手机使用独立网关，默认端口为 `8124`，默认关闭。`PORT` 不控制手机网关端口。接口边界见[代码设计](docs/CODE_DESIGN.md#http-api)。
+
+## 视频重建
+
+1. 用手机横屏或竖屏**边走边拍**，速度接近正常人步行；转角和门口放慢，避免快速甩镜头。
+2. 单段建议 10 秒到 8 分钟、1080p 以上。多房间可以分几段拍摄，但相邻两段要拍到同一面墙或同一个门口。
+3. 在工作台点击「新建项目」，在「房屋视频」里选择视频（可多选），需要时再补一个图片文件夹。
+4. 「每段视频保留帧数」保持自动即可：工作台按时长取 40–300 帧。帧数越多覆盖越全，但匹配耗时约按帧数平方增长。
+5. 点击「开始重建」。抽帧发生在「素材预处理」阶段，日志会显示每段视频的保留帧数。
+6. 完成画面检查时，留意抽帧报告里的告警：模糊、纹理不足、视角过少、画面亮度跳变都会单独提示。
+
+视频不会被复制进项目，抽帧结果缓存在 `projects/<id>/video-frames/`。同一段视频重跑预处理不会重新解码。手机端视频上限为单段 1 GB、每批 6 段，并会核对时长（3 秒至 10 分钟）与长边（≥1280）后才允许提交。
+
+iPhone 默认用 HEVC 录制。若提示无法解码，把「设置 → 相机 → 格式」改为「兼容性最佳」后重录，或用 ffmpeg 转成 H.264 MP4：
+
+```text
+ffmpeg -i input.mov -c:v libx264 -crf 20 -pix_fmt yuv420p -c:a aac output.mp4
+```
 
 ## 电脑照片重建
 
@@ -241,6 +260,8 @@ node --test @testFiles
 $env:PYTHONUTF8 = '1'
 & .venv/Scripts/python.exe -B -m unittest discover -s tools/workbench/py -p 'test_*.py' -v
 ```
+
+视频抽帧的黄金测试分两轨：轨 A 用确定性合成帧、不经 ffmpeg，精确钉住选帧结果；轨 B 用四个入库的 H.264 fixture 走真实 ffmpeg 解码，需要 ffmpeg 与 ffprobe（`.env` 的 `FFMPEG` 或 `PATH`）。缺少 ffmpeg 时轨 B 按设计**失败**而不是跳过，也不会改用 OpenCV 静默代跑；干净 checkout 上这些失败属预期行为，与本节末尾「默认跳过的用例不能算作通过」同一口径，不代表套件损坏。
 
 部分原生几何集成测试使用 `GAUSSROOM_NATIVE_TEST=1`，需要 COLMAP 和相应依赖。默认跳过的用例不能算作通过。旧的 `test_assistance_all.ps1` 仅选取部分 Node 测试，不能代替上述全量命令。
 

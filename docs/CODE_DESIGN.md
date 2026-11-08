@@ -61,13 +61,13 @@ COLMAP 命令行程序负责特征与匹配，以及普通照片位姿恢复。p
 `project.json` 的主要字段为：
 
 - 身份：`id`、`name`、`createdAt`、`updatedAt`。
-- 输入：`sourceDir`、`sourceImageCount`、可选 `photoSources`、`inputKind` 和 `capture`。
+- 输入：`sourceDir`、`sourceImageCount`、可选 `photoSources`、`videoSources`（`{path,name,bytes}` 数组）、`videoFrameTarget`、`inputKind` 和 `capture`。
 - 配置：`trainingPreset`、`useGpu`、`cameraModel`、`mapper`、`featurePreset`。
 - 执行：`state`、`steps`、`currentStep`、`lastError`。
 - 模型：`selectedModel`、`activeAttemptId`、`pendingAttemptId`、可选 `componentSource` 和 `trainingResume`。
 - 手机照片关联：可选 `photoSessionId`。
 
-`inputKind` 为 `photos` 或 `arkit_scan`。旧项目缺少该字段时按 `photos` 处理。LiDAR 的 `capture` 保存 `{format,scanId,root,manifestSha256}`；`root` 是电脑内部路径，不返回给手机。
+`inputKind` 为 `photos`、`video` 或 `arkit_scan`。旧项目缺少该字段时按 `photos` 处理。`video` 表示项目含视频素材：`sourceDir` 可能为空字符串，`photoSources` 可能为空数组，此时不能按「一定有图片目录」去拼路径。手机视频项目另有 `videoSessionId` 指回上传批次。LiDAR 的 `capture` 保存 `{format,scanId,root,manifestSha256}`；`root` 是电脑内部路径，不返回给手机。
 
 桌面项目摘要由 `summarise` 派生。它增加进度、质量、时间和场景入口。手机使用删减后的摘要，不直接返回 `project.json`。
 
@@ -81,6 +81,12 @@ projects/
     project.json
     assistance.json                 # 可选，跨尝试的用户资料
     source-images/                  # 手机照片或明确追加的输入副本
+    source-videos/                  # 手机上传的视频副本；桌面视频不被复制
+    video-frames/                   # 抽帧缓存，跨尝试共享
+      <POLICY_VERSION>/              # 当前为 gsr-kf-2
+        <视频sha16>-t<auto|N>/
+          report.json
+          frames/frame-00005.jpg
     capture/                        # LiDAR 原始包解开后的数据
     attempts/
       a-<24位十六进制>/
@@ -131,7 +137,7 @@ projects/
 ### 2.3 三类清单和文件身份
 
 - 扫描清单 `capture/manifest.json`：描述传感器原始数据和逐文件哈希，格式为 `gaussroom_scan_v1`。
-- 预处理清单 `<workspace>/manifest.json`：描述 `records[].source`、`sha256`、`work_image`、`work_size`、排除原因及相机组。
+- 预处理清单 `<workspace>/manifest.json`：描述 `records[].source`、`sha256`、`work_image`、`work_size`、排除原因及相机组；视频项目另有 `videos[]`（时长、分辨率、保留帧数、`reportPath`、`policyHash`、告警）与顶层 `error{code,message}`；`records[].kind` 区分 `photo` 与 `video_frame`。
 - 尝试记录 `attempt.json`：描述计算类型、输入修订、输入指纹、结果与失败原因。
 
 这三者用途不同。扫描关键帧编号、工作图片名、COLMAP `image_id` 和 `camera_id` 也不同。通过清单与数据库名称显式关联，不能按目录顺序或从 1 连续编号推断。
@@ -213,6 +219,54 @@ LiDAR 摘要的 `scaleSource:"lidar"` 表示坐标来源。它不同于质量字
 
 `resumeCheckpoint` 是桌面运行请求允许的字段，但当前恢复校验以项目已有的 `trainingResume` 和检查点为准。它不是任意文件路径导入接口，不能仅传此字段就完成恢复准备。
 
+<a id="视频抽帧"></a>
+### 4.1 视频输入与抽帧
+
+项目可以有三种素材：图片目录（`photoSources`）、视频文件（`videoSources`，记录 `{path,name,bytes}`）、两者混合。`inputKind` 为 `video` 当且仅当存在视频；纯视频项目的 `sourceDir` 为空字符串，`photoSources` 为空数组。视频只被读取，不复制进项目；手机上传的视频复制到 `source-videos/` 后才由 `videoSources` 指向。
+
+> 术语区分：本文档中"关键帧"专指 LiDAR 扫描包 `gaussroom_scan_v1` 里携带位姿的采集帧（见 [8.2](#82-关键帧与矩阵)）。视频抽出的画面一律称"帧"或"抽帧"，它没有位姿、也没有可信尺度，与扫描关键帧不是同一种东西，代码与 UI 中不要混用这两个词。
+
+视频不作为独立阶段，而是在 `prepare` 内部先抽帧、再与照片一起进入同一套预处理。这样七阶段契约、几何门禁、尝试与辅助求解都不需要改动。`prepare` 的命令行因此变为：
+
+```text
+prepare_project.py --source <图片目录…> --video <视频文件…> \
+  --frame-cache <项目>/video-frames --target-frames <0=自动|N> --ffmpeg <路径>
+```
+
+`--target-frames` 缺省即自动：argparse `default=0`，帮助文本为「0 表示按时长自动决定」。显式传 `0` 与不传在 CLI 上同归自动，但作为 API 输入是两回事——`test_video_frames.py` 显式传 `target_frames=0`，而 `plan_sampling()` 的 `user_target` 只把「真值且 > 0」当作用户指定，`None` 与 `0` 都落自动；Node 侧 `videoFrameTarget ?? 0` 同样把未设置折算成 0。因此 `<0=自动|N>` 里的 0 表示「显式自动」，不是「保留 0 帧」。
+
+抽帧由 [video_frames.py](../tools/workbench/py/video_frames.py) 完成，流程为：探针（ffprobe，必需）→ 预算 → 整数帧号步长取样 → 512 长边打分 → 硬拒绝 → 近重复合并 → 等时间分桶择优 → 空隙补帧。
+
+- **预算**：`N = clamp(120·√(T/120), 40, 300)`（自动），用户指定时 `clamp(N, 20, 600)`。候选池为 `min(2.5N, 1200)`，反推整数步长 `k = max(1, round(0.1·fps), round(Δ·fps))`。全程整数步长；按设计约定，ffmpeg 与 OpenCV 两条解码路径应产出完全相同的候选集，该一致性已由 `test_video_frames_golden.py` 的双解码器一致性用例（`DualDecoderConsistency`）验证——断言范围仅限候选集（候选数与第 n 个候选对应的源帧号），像素与由此派生的指标、保留帧不在断言内。
+- **指标**：清晰度用 3×3 Laplacian 方差，纹理用梯度幅值 >12 的像素占比，曝光用均值与灰度 ≥250/≤5 的比例；全部在 512 长边灰度图上计算，这是绝对阈值可用的前提。近重复用 64 位 dHash。
+- **判据**：先斩首尾 0.3 秒与曝光（过曝 >0.35、欠曝 >0.45、均值 >225 或 <30），再以"通过曝光者的中位数"派生清晰度阈值 `max(80, 0.45·p50)`，然后近重复合并（Hamming ≤6），最后按等时间桶保留每桶最高分；桶内全灭时允许用模糊帧补位，但**不允许用近重复帧补位**。空隙（相邻保留帧 Hamming >20）最多补 `max(1, n/10)` 帧。
+- **退化处理**：低纹理占比 >0.60 时预算降到 40；整段偏模糊时预算降到 60 并标记 `likely_failure`；静止画面按近重复自然收敛，报告给出 `low_view_diversity`。
+- **缓存**：`<项目>/video-frames/<POLICY_VERSION>/<视频sha16>-t<target>/`，含 `frames/frame-00005.jpg` 与 `report.json`。缓存挂在项目根上，不在尝试目录内，所以重跑 `prepare` 或新建尝试都不会重新解码。复用条件为 `schema_version`、视频 `sha256`、`policy_hash` 一致且 `frames` 非空、帧文件齐全。
+  失效有**两条互不覆盖**的路径：改**阈值**由 `policy_hash` 自动失效，无需人工干预；改**选帧逻辑**（分桶、去重、过滤顺序）不改变 `policy_hash`，只能靠手工 bump `POLICY_VERSION`——它是缓存**路径**的一部分，改了才换目录。漏 bump 时阈值常量与版本串都没有改动，新代码算出的 `policy_hash` 与旧缓存完全一致；后果是旧逻辑产出的帧被复用，而 `policy_hash` 与 `POLICY_VERSION` 都无法区分新旧逻辑，事后无迹可查。bump 会同时改变 `policy_hash`（版本号参与其哈希），旧目录成为孤儿，需要手动清理。同时 `report.json` 的 `build.sha` 记录产出代码版本，用于事后归因，但**不参与**命中判定——否则改一行注释就会触发全量重抽。
+- **命名**：帧进入 `images/<camera-XX>/` 时使用 `v<视频sha8>-frame-00005.jpg`，跨视频不撞名；同一视频的所有帧尺寸一致，因此自然落在一个相机组。
+- **色彩**：HDR（`arib-std-b67`/`smpte2084`）在 ffmpeg 侧走 `zscale→tonemap=hable→bt709` 转 SDR；无 zscale 时硬失败，不用 OpenCV 静默裁切。10bit 且无色彩标记按 `hdr_unverified` 拒绝。
+
+**阈值状态**：以上数值是工程估值，**未经真实素材标定**。自测只证明实现与公式一致，不证明阈值合理。标定项与计划见 [PRD](PRD.md#verification)。
+
+失败以 `manifest.json` 的 `error` 与 `videos[].errorCode` 表达，而不是靠退出码：`jobs` 把非零退出当作崩溃，不会走到 `verify()`，可执行的文案就传不到 UI。素材级失败（`source_missing`、`no_input`、`decode_failed`、`hdr_requires_ffmpeg`、`ffmpeg_missing`、`ffprobe_missing`、`probe_timeout`、`decode_timeout`）与素材不足（`insufficient_media`）都走这条通道。单个视频失败即整体失败，单张照片失败只记入 `excluded`：一段视频代表一个房间或一条轨迹，静默丢弃会产出"成功但缺一块区域"的模型。
+
+### 4.1.1 冻结清单
+
+本次交付的代码侧已随 commit `7780f35` 入库。本节记录的是采集时的**工作区文件字节**，与 git blob 只在换行符上不同——git 按 LF 归一化存储，本机工作区为 CRLF，`video_frames.py`、`prepare_project.py`、`pipeline.mjs` 三个文本文件因此 blob 摘要与下表不同，内容一致。以下值用于事后归因与第三方核对，均由主理人实测或程序化采集，逐字记录：
+
+- `POLICY_VERSION` = `gsr-kf-2`；`POLICY_HASH` = `08a52dc4c8c3`。
+- `BUILD_SHA` = `01e3af85304b`：它是 `video_frames.py` **工作区文件字节** sha256 的前 12 位，**不是 git commit**。采集时 HEAD = `4270ccd90d37b23b6c79bc132b9fcb70ab56f6e7`；此后 `5edb64e`（Node 测试开局清理）、`c0eaf2d`（fixture 再生成脚本）、`531fe55`（黄金测试与 fixture 入库）、`7780f35`（视频管线主体入库）都已落地，本节落笔时 HEAD = `7780f352e4000cff88a32049cb343830a9f63b7c`。五个文件的内容与其入库版本一致（`git diff 7780f35 -- <文件>` 为空），但按 blob 直接算 sha256 会因 CRLF/LF 得到别的值，核对时须先去掉 `\r`。冻结值绑定**工作区字节**，任何文件字节变动都会令上述哈希失效，必须重新采集后再核对。
+- 五个关键文件 sha256：
+  - `tools/workbench/py/video_frames.py` = `01e3af85304bda1641bde855ab3a5ba96cf4070b6c0ae468dc0e1de6c8722b00`
+  - `tools/workbench/py/prepare_project.py` = `b2fac21dc34ceb0fffc53978ed96ea323c57ba776fbad00e2d709eecd0893a45`
+  - `tools/workbench/lib/pipeline.mjs` = `e4be0684da053936a65acd8c1be257c54469dc84d716df7c9e24635794a3673b`
+  - `tools/workbench/lib/video-sessions.mjs` = `01e9669eeef97c57c0e3be31ff6e8cd2a7feb2048737ddee764a6b4597a736e0`
+  - `tools/workbench/lib/video-tools.mjs` = `bcd121f3701ee898842d3232796c4a13bec53d452ca6ac5118ea6fccc40cf131`
+  - `prepare_project.py` 等文件仍会随后续改动变化，本节记录的是该次冻结的快照，不是长期有效值。
+- 工具链（本机）：ffmpeg / ffprobe `8.1.2-full_build-www.gyan.dev`、Python `3.13.14`、cv2 `5.0.0`、numpy `2.5.4`、Pillow `12.3.0`、`Windows-11-10.0.26200-SP0`。`ffmpeg configuration` 全文以 `tools/video-golden/ENVIRONMENT.json` 的程序化采集值为准（该文件已随黄金测试入库，见 commit `531fe55`；采集时间 `2026-11-08T18:04:22+08:00`；工具链变化时须用 `tools/video-golden/generate_fixtures.sh` 重建 fixture 并以同一程序化逻辑重捕 manifest，禁止手改），本节不手抄，以免与真实构建产生偏差。
+
+本节只固定**输入侧指纹**（策略版本、策略哈希、代码字节、工具链）。选帧回归已分两轨落地：轨 A 以确定性合成帧为输入、不经 ffmpeg，精确钉住 `src_idx`、保留帧数、预算、空桶与补帧数、拒绝原因分布，并把 `report.json` 与选帧层逐字段对账；轨 B 用四个入库的 H.264 二进制 fixture 走真实 ffmpeg 解码，只断言结构不变量与四类场景的错误码，刻意不钉 `src_idx`。fixture 由 `tools/video-golden/generate_fixtures.sh` 一次性生成（命令与 `ENVIRONMENT.json` 的 `fixture_generation` 字段一致），脚本不参与 CI；重新生成后须用同一程序化逻辑重捕 sha256，禁止手抄。黄金值按 `BUILD_SHA` 与 `POLICY_HASH` 钉住，输入字节或工具链任一不符即按设计 skip 而非 fail。跨机器可复现目前只有本机一套采集记录，尚未在第二套工具链上实跑，见 [PRD 5.7](PRD.md#verification)。
+
 <a id="http-api"></a>
 ## 5. HTTP 接口总则
 
@@ -240,7 +294,8 @@ JSON 请求使用 `Content-Type: application/json`。通用 JSON 请求上限为
 - `GET /api/presets`：返回训练档位、特征档位和门禁常量。
 - `POST /api/dialog/folder`：请求 `{title?}`；打开 Windows 文件夹选择器。选中返回 `{path,imageCount}`，取消返回 204。
 - `GET /api/projects`：返回项目摘要数组。
-- `POST /api/projects`：请求 `{name,sourceDir,trainingPreset,useGpu?,cameraModel?,mapper?,featurePreset?}`；201 返回项目摘要。`trainingPreset` 必填。
+- `POST /api/projects`：请求 `{name,sourceDir?,videoPaths?,videoFrameTarget?,trainingPreset,useGpu?,cameraModel?,mapper?,featurePreset?}`；201 返回项目摘要。`trainingPreset` 必填，`sourceDir` 与 `videoPaths` 至少给一个；带 `videoPaths` 时若 ffmpeg/ffprobe 不可用返回 409 并说明部署修复方式。
+- `POST /api/dialog/files`：请求 `{title?,filter?}`；打开 Windows 多选文件对话框，返回 `{paths,items:[{path,name,bytes}]}`，取消返回 204。
 - `GET /api/projects/:id`：返回当前项目摘要，叠加运行中内存进度。
 - `PATCH /api/projects/:id`：支持名称、训练档位、GPU、相机模型、特征档位、mapper 和已存在的 `selectedModel`。运行中关键设置返回 409。响应为摘要。
 - `DELETE /api/projects/:id`：非运行项目删除成功返回 `{removed:id}`；删除路径按已验证请求 ID 解析。
@@ -390,6 +445,18 @@ SVG 以相机视频实际显示区域为边界，包含横竖屏留边计算。�
 
 方向 API 可能不给出数据，也不保证静止时持续发送事件。过旧样本宁可不记录，页面继续显示文字提示，拍照与上传继续运行。已知前置相机不启用方向点。状态与时序检查见 [test_capture_guidance.mjs](../tools/workbench/test_capture_guidance.mjs)；实机清单见 [PRD](PRD.md#verification)。
 
+### 7.3.1 视频批次
+
+`/api/mobile/v1/video-sessions` 与照片批次相互独立，状态机为 `open → committing → committed`，删除时先落 `deleting`。
+
+- `POST /video-sessions`：`{name,trainingPreset}`。
+- `POST /video-sessions/:id/files`：`{name,bytes}`，只接受 `.mp4/.mov/.m4v`；单段 ≤1 GiB、每批 ≤6 段且 ≤2 GiB。
+- `PUT /video-sessions/:id/files/:fid`：分片上传，`Content-Range: bytes a-b/total`，单片 ≤8 MiB。已确认分片的重放是幂等空操作；偏移不符返回 409 并带回当前 `offset`。最后一片在同一请求内完成校验。
+- `POST /video-sessions/:id/files/:fid/complete`：不重传，仅重新校验已落盘的字节（服务中断或 ffmpeg 修好后使用）。
+- `GET /video-sessions/:id`、`DELETE /video-sessions/:id`、`POST /video-sessions/:id/commit`。
+
+校验在服务端进行：ffprobe 探针 → 时长 3 秒至 10 分钟、长边 ≥1280 → 内容哈希去重 → `ready`。失败保留 `.part` 并给出 `errorCode`，只有显式删除才丢弃字节。commit 复制为 `source-videos/<fileId><ext>`（按文件 id 命名，避免同名覆盖与 Windows 保留名）后创建项目。
+
 ### 7.4 HTTPS 与身份交接
 
 桌面仍仅监听本机 8123。旧 HTTP 手机网关为 8124，HTTPS 为 8125，两者共享同一授权状态和照片批次。仅私有网络可访问。公开资源为手机页面、`GET /mobile/connection.json`、`GET /mobile/ca.cer` 与 `GET /mobile/ios.mobileconfig`。连接 JSON 只包含 HTTPS 状态、端口及公开证书描述。
@@ -509,6 +576,7 @@ COLMAP 的世界到相机变换为 `diag(1,-1,-1,1) * inverse(cameraToWorld)`。
 ## 9. 修改入口与维护规则
 
 - 增加阶段或调整命令：从 pipeline、jobs 和预处理/几何入口开始，检查状态、重试与时间是否同步。
+- 调整视频抽帧阈值：`policy_fingerprint()` 已把阈值纳入 `POLICY_HASH`，改阈值会**自动**让旧缓存失效，无需手工 bump；但必须同步更新 `test_video_frames.py` 钉住的 `PINNED_POLICY_HASH`，否则钉住测试会报错提醒。改 `POLICY_VERSION` 或任何影响选帧结果的代码字节时，还要在同一提交里同步 `test_video_frames_golden.py` 的 `PINNED_BUILD_SHA` 与 `GOLDEN` 表、`tools/video-golden/ENVIRONMENT.json` 的 `golden` 段与 fixture sha256，并重抓轨 A 黄金值；否则黄金测试会按设计 skip，覆盖静默消失而不是报红。反过来，改**选帧逻辑**（分桶、去重、过滤顺序、补位/补帧）不会改变 `POLICY_HASH`，这时才必须手工 bump `video_frames.POLICY_VERSION`，并清理旧的 `<POLICY_VERSION>/` 缓存目录，否则 `policy_hash` 与 `POLICY_VERSION` 都无法区分新旧逻辑，事后无迹可查。改动抽帧参数时同步检查它与 `_decode_ffmpeg`、`probeVideo` 的超时层级（外层须为内层数倍），否则被 SIGKILL 的子进程会截断错误码。
 - 修改手机功能：同步网关、照片批次、网页状态模块和原生客户端；保持桌面私有路由隔离。
 - 修改几何或局部修正：保留真实观察和来源证明，补充退化场景测试；不能只隐藏质量提示。
 - 修改格式：显式升级版本，更新生产端、校验器与转换测试，不能只改清单字段名。
