@@ -1,0 +1,47 @@
+{
+  "schema": "gaussroom.video-golden/1",
+  "note": "程序化采集，勿手改。工具链任一组件变化都必须重跑采集脚本并同步重抓黄金值；测试在版本不符时 skip 而不是 fail，避免假红掩盖真回归。轨 A 不依赖 ffmpeg，因此它只比对 numpy/opencv/pillow/python；轨 B 走真实解码，额外比对 ffmpeg/ffprobe。",
+  "captured_at": "2026-11-08T18:04:22+08:00",
+  "os": {
+    "platform": "Windows-11-10.0.26200-SP0",
+    "system": "Windows",
+    "release": "11",
+    "machine": "AMD64"
+  },
+  "python": "3.13.14",
+  "numpy": "2.5.4",
+  "opencv": "5.0.0",
+  "pillow": "12.3.0",
+  "ffmpeg": {
+    "version": "ffmpeg version 8.1.2-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers",
+    "configuration": "configuration: --enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-cairo --enable-fontconfig --enable-iconv --enable-gnutls --enable-lcms2 --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-libsnappy --enable-zlib --enable-librist --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-libbluray --enable-libcaca --enable-libdvdnav --enable-libdvdread --enable-sdl2 --enable-libaribb24 --enable-libaribcaption --enable-libdav1d --enable-libdavs2 --enable-libopenjpeg --enable-libquirc --enable-libuavs3d --enable-libxevd --enable-libzvbi --enable-liboapv --enable-libqrencode --enable-librav1e --enable-libsvtav1 --enable-libvvenc --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxeve --enable-libxvid --enable-libaom --enable-libjxl --enable-libsvtjpegxs --enable-libvpx --enable-mediafoundation --enable-libass --enable-frei0r --enable-libfreetype --enable-libfribidi --enable-libharfbuzz --enable-liblensfun --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi --enable-libshaderc --enable-vulkan --enable-libplacebo --enable-opencl --enable-libcdio --enable-openal --enable-libgme --enable-libmodplug --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libshine --enable-libtheora --enable-libtwolame --enable-libvo-amrwbenc --enable-libcodec2 --enable-libilbc --enable-libgsm --enable-liblc3 --enable-libopencore-amrnb --enable-libopus --enable-libspeex --enable-libvorbis --enable-ladspa --enable-libbs2b --enable-libflite --enable-libmysofa --enable-librubberband --enable-libsoxr --enable-chromaprint --enable-whisper"
+  },
+  "ffprobe": {
+    "version": "ffprobe version 8.1.2-full_build-www.gyan.dev Copyright (c) 2007-2026 the FFmpeg developers"
+  },
+  "golden": {
+    "policy_version": "gsr-kf-2",
+    "policy_hash": "08a52dc4c8c3",
+    "build_sha": "01e3af85304b",
+    "fixtures": {
+      "dark-6s.mp4": "48a831c877d10814e98cbd08d15794dad8261a51f213ca37ac4c1584026b7699",
+      "short-1s.mp4": "79a63d0b294e0977c31f73b0123f41b35bcb55468400bac7d3638d64e4425c2a",
+      "still-6s.mp4": "16c901418ecb210b8a753ca1c7127254320482274ab4767dfc8c618eff5979fa",
+      "walk-6s.mp4": "0b99a87d86b368fefe7fcbb102ff2414d2439750cda0e7f54bbdfce9c1f1e865"
+    },
+    "track_a_input_sha256": {
+      "animated_6s": "209c2834221cfe64",
+      "static_6s": "6b905fd2e6e828c9",
+      "dark_6s": "e5a63f450e7898d6",
+      "blurred_t40": "22b8886badf55c2f",
+      "paused_t20_fps24": "18bd5647cce927b8"
+    }
+  },
+  "fixture_generation": {
+    "_note": "一次性生成命令；测试运行时不编码。fixture 以二进制入库并断言自身 sha256。",
+    "walk-6s.mp4": "ffmpeg -hide_banner -loglevel error -y -f lavfi -i \"testsrc2=size=1920x1080:rate=24:duration=6\" -vf \"crop=1280:720:x='640*t/6':y='180'\" -pix_fmt yuv420p -c:v libx264 -crf 34 -preset veryslow -g 48 -movflags +faststart walk-6s.mp4",
+    "still-6s.mp4": "ffmpeg -hide_banner -loglevel error -y -f lavfi -i \"testsrc=size=1280x720:rate=24:duration=6\" -pix_fmt yuv420p -c:v libx264 -crf 32 -preset veryslow -g 48 -movflags +faststart still-6s.mp4",
+    "dark-6s.mp4": "ffmpeg -hide_banner -loglevel error -y -f lavfi -i \"testsrc=size=1280x720:rate=24:duration=6\" -vf \"eq=brightness=-0.95:saturation=0\" -pix_fmt yuv420p -c:v libx264 -crf 34 -preset veryslow -g 48 -movflags +faststart dark-6s.mp4",
+    "short-1s.mp4": "ffmpeg -hide_banner -loglevel error -y -f lavfi -i \"testsrc2=size=640x360:rate=24:duration=1\" -pix_fmt yuv420p -c:v libx264 -crf 34 -preset veryslow -g 24 -movflags +faststart short-1s.mp4"
+  }
+}
